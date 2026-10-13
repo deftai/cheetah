@@ -42,10 +42,6 @@ struct ResultMetadata<'a> {
     fallback_from: Option<&'a str>,
 }
 
-fn parse_secret(s: &str) -> Result<Secret, std::convert::Infallible> {
-    Ok(Secret::new(s))
-}
-
 #[derive(Parser, Debug)]
 #[command(name = "cheetah-fast", about = "Fast static page scraper worker")]
 struct Args {
@@ -68,7 +64,7 @@ struct Args {
     /// Prefer the GITHUB_TOKEN environment variable: a flag value is visible in
     /// `ps`. Use a fine-grained read-only token; the extractor refuses
     /// non-public repositories either way.
-    #[arg(long, env = "GITHUB_TOKEN", hide_env_values = true, value_parser = parse_secret)]
+    #[arg(long, env = "GITHUB_TOKEN", hide_env_values = true)]
     github_token: Option<Secret>,
 }
 

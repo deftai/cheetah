@@ -7,8 +7,8 @@
 //! certificate verification pins its identity.) The optional token is sent to
 //! that host only, and only for repositories that are public, so a token with
 //! private access cannot be used to read private content through this worker.
-//! Any failure (unsupported URL, rate limit, 404, oversize or binary content)
-//! surfaces as `Error::Extractor`, so the chain falls back to the generic fetch.
+//! Any failure (unsupported URL, rate limit, 404, binary or oversize content)
+//! is an `Err`, so the chain falls back to the generic fetch.
 //!
 //! Known limitations: a `blob` URL whose branch name contains `/` is split at
 //! the first segment, so it 404s (and falls back) or, rarely, reads another
@@ -36,28 +36,25 @@ const ACCEPT_RAW: &str = "application/vnd.github.raw+json";
 const MAX_API_BODY: usize = 2 * 1024 * 1024;
 const COMMENTS_PER_PAGE: usize = 100;
 /// Longest pause taken after a rate-limit response, whatever GitHub asks for.
-const MAX_COOLDOWN_SECS: u64 = 3600;
+/// The pause is process-wide, so it is kept short: a long one would send every
+/// job to the generic fetch for as long as it lasts.
+const MAX_COOLDOWN_SECS: u64 = 300;
 
 /// Unix time before which API calls are skipped because GitHub rate limited us.
 static RATE_LIMITED_UNTIL: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, PartialEq)]
-pub(super) enum Target {
-    Readme {
-        owner: String,
-        repo: String,
-    },
-    File {
-        owner: String,
-        repo: String,
-        git_ref: String,
-        path: Vec<String>,
-    },
-    Issue {
-        owner: String,
-        repo: String,
-        number: u64,
-    },
+pub(super) enum Kind {
+    Readme,
+    File { git_ref: String, path: Vec<String> },
+    Issue { number: u64 },
+}
+
+#[derive(Debug, PartialEq)]
+pub(super) struct Target {
+    owner: String,
+    repo: String,
+    kind: Kind,
 }
 
 fn ex<E>(msg: &'static str) -> impl FnOnce(E) -> Error {
@@ -105,24 +102,25 @@ pub(super) fn parse_target(raw: &str) -> Result<Target> {
         return fail("not a repository URL");
     }
     let (owner, repo) = (segs[0].to_string(), repo_seg.to_string());
-    match &segs[2..] {
-        [] => Ok(Target::Readme { owner, repo }),
-        ["blob", git_ref, path @ ..] if !path.is_empty() => {
-            let git_ref = decode_segment(git_ref).ok_or(()).map_err(ex("unsupported file ref"))?;
+    let kind = match &segs[2..] {
+        [] => Kind::Readme,
+        // A trailing slash names a directory, which the contents API lists as JSON.
+        ["blob", git_ref, path @ ..] if !path.is_empty() && !url.path().ends_with('/') => {
+            let git_ref = decode_segment(git_ref)
+                .ok_or_else(|| Error::Extractor("unsupported file ref".into()))?;
             let path = path
                 .iter()
                 .map(|p| decode_segment(p))
                 .collect::<Option<Vec<_>>>()
-                .ok_or(())
-                .map_err(ex("unsupported file path"))?;
-            Ok(Target::File { owner, repo, git_ref, path })
+                .ok_or_else(|| Error::Extractor("unsupported file path".into()))?;
+            Kind::File { git_ref, path }
         }
-        ["issues" | "pull", n] if n.bytes().all(|b| b.is_ascii_digit()) => {
-            let number = n.parse().map_err(ex("bad issue number"))?;
-            Ok(Target::Issue { owner, repo, number })
-        }
-        _ => fail("unsupported GitHub URL"),
-    }
+        ["issues" | "pull", n] if n.bytes().all(|b| b.is_ascii_digit()) => Kind::Issue {
+            number: n.parse().map_err(ex("bad issue number"))?,
+        },
+        _ => return fail("unsupported GitHub URL"),
+    };
+    Ok(Target { owner, repo, kind })
 }
 
 fn build_url(base: &str, segments: &[&str], query: &[(&str, &str)]) -> Result<Url> {
@@ -304,15 +302,15 @@ pub(super) async fn extract_with_base(
     url: &str,
     config: &FetchConfig,
 ) -> Result<PageResult> {
-    let (title, markdown, raw) = match parse_target(url)? {
-        Target::Readme { owner, repo } => {
-            ensure_public(base, client, &owner, &repo, config).await?;
+    let Target { owner, repo, kind } = parse_target(url)?;
+    ensure_public(base, client, &owner, &repo, config).await?;
+    let (title, markdown, raw) = match kind {
+        Kind::Readme => {
             let api = build_url(base, &["repos", &owner, &repo, "readme"], &[])?;
             let text = utf8_text(api_get(client, api, ACCEPT_RAW, config).await?)?;
             (format!("{owner}/{repo}"), text.clone(), text)
         }
-        Target::File { owner, repo, git_ref, path } => {
-            ensure_public(base, client, &owner, &repo, config).await?;
+        Kind::File { git_ref, path } => {
             let mut segs = vec!["repos", owner.as_str(), repo.as_str(), "contents"];
             segs.extend(path.iter().map(String::as_str));
             let api = build_url(base, &segs, &[("ref", &git_ref)])?;
@@ -325,8 +323,7 @@ pub(super) async fn extract_with_base(
             };
             (one_line(&format!("{owner}/{repo}: {name}")), md, text)
         }
-        Target::Issue { owner, repo, number } => {
-            ensure_public(base, client, &owner, &repo, config).await?;
+        Kind::Issue { number } => {
             let n = number.to_string();
             let per_page = COMMENTS_PER_PAGE.to_string();
             let issue_url = build_url(base, &["repos", &owner, &repo, "issues", &n], &[])?;
@@ -382,8 +379,12 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
+    fn target(owner: &str, repo: &str, kind: Kind) -> Target {
+        Target { owner: owner.into(), repo: repo.into(), kind }
+    }
+
     fn readme(owner: &str, repo: &str) -> Target {
-        Target::Readme { owner: owner.into(), repo: repo.into() }
+        target(owner, repo, Kind::Readme)
     }
 
     #[test]
@@ -396,30 +397,29 @@ mod tests {
         assert_eq!(parse_target("https://github.com/o/r.git").unwrap(), readme("o", "r"));
         assert_eq!(
             parse_target("https://github.com/o/r/blob/main/src/lib.rs").unwrap(),
-            Target::File {
-                owner: "o".into(),
-                repo: "r".into(),
-                git_ref: "main".into(),
-                path: vec!["src".into(), "lib.rs".into()]
-            }
+            target(
+                "o",
+                "r",
+                Kind::File { git_ref: "main".into(), path: vec!["src".into(), "lib.rs".into()] }
+            )
         );
         assert_eq!(
             parse_target("https://github.com/o/r/issues/5").unwrap(),
-            Target::Issue { owner: "o".into(), repo: "r".into(), number: 5 }
+            target("o", "r", Kind::Issue { number: 5 })
         );
         assert_eq!(
             parse_target("https://github.com/o/r/pull/12").unwrap(),
-            Target::Issue { owner: "o".into(), repo: "r".into(), number: 12 }
+            target("o", "r", Kind::Issue { number: 12 })
         );
     }
 
     #[test]
     fn decodes_percent_encoded_paths() {
-        match parse_target("https://github.com/o/r/blob/main/docs/My%20Doc%C3%A9.md").unwrap() {
-            Target::File { path, .. } => {
+        match parse_target("https://github.com/o/r/blob/main/docs/My%20Doc%C3%A9.md").unwrap().kind {
+            Kind::File { path, .. } => {
                 assert_eq!(path, vec!["docs".to_string(), "My Docé.md".to_string()])
             }
-            other => panic!("unexpected target {other:?}"),
+            other => panic!("unexpected kind {other:?}"),
         }
     }
 
@@ -438,6 +438,7 @@ mod tests {
             "https://github.com/o/r/issues/5/extra",
             "https://github.com/o/r/issues/99999999999999999999999",
             "https://github.com/o/r/blob/main",
+            "https://github.com/o/r/blob/main/src/",
             "https://github.com/o/r/blob/main/a%2Fb",
             "https://github.com/o/r/blob/main/a%5Cb",
             "https://github.com/o/r/blob/main/a%00b",
@@ -453,12 +454,12 @@ mod tests {
     #[test]
     fn dot_segments_are_normalised_by_the_parser_not_forwarded() {
         // `..` never reaches the API URL: the URL parser resolves it first.
-        match parse_target("https://github.com/o/r/blob/main/../etc/passwd").unwrap() {
-            Target::File { git_ref, path, .. } => {
+        match parse_target("https://github.com/o/r/blob/main/../etc/passwd").unwrap().kind {
+            Kind::File { git_ref, path } => {
                 assert_eq!(git_ref, "etc");
                 assert_eq!(path, vec!["passwd".to_string()]);
             }
-            other => panic!("unexpected target {other:?}"),
+            other => panic!("unexpected kind {other:?}"),
         }
     }
 
@@ -536,10 +537,10 @@ mod tests {
         assert_eq!(
             cooldown_until(
                 403,
-                &headers(&[("x-ratelimit-remaining", "0"), ("x-ratelimit-reset", "1000600")]),
+                &headers(&[("x-ratelimit-remaining", "0"), ("x-ratelimit-reset", "1000200")]),
                 now
             ),
-            Some(1_000_600)
+            Some(1_000_200)
         );
         assert_eq!(
             cooldown_until(429, &headers(&[("retry-after", "30")]), now),
@@ -607,7 +608,7 @@ mod tests {
 
     fn with_token() -> FetchConfig {
         FetchConfig {
-            github_token: Some(Secret::new("ghp_secret")),
+            github_token: Some(Secret::new("test-token-not-real")),
             ..FetchConfig::default()
         }
     }
@@ -675,7 +676,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refusals_empty_binary_and_oversize_are_extractor_errors() {
+    async fn refusals_empty_and_binary_are_extractor_errors_and_oversize_is_refused() {
         let (base, _) = fake_api(vec![
             ("/repos/o/limited/readme", 403, b"nope"),
             ("/repos/o/binary/contents/x.bin", 200, &[0xff, 0xfe, 0x00, 0x80]),
@@ -746,6 +747,6 @@ mod tests {
 
     #[test]
     fn secret_debug_is_redacted() {
-        assert!(!format!("{:?}", with_token()).contains("ghp_secret"));
+        assert!(!format!("{:?}", with_token()).contains("test-token-not-real"));
     }
 }

@@ -108,6 +108,16 @@ impl Secret {
     }
 }
 
+impl std::str::FromStr for Secret {
+    type Err = std::convert::Infallible;
+
+    /// Trims surrounding whitespace: a trailing newline (`$(cat tokenfile)`)
+    /// would make the token an invalid header value.
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(Self(s.trim().to_string()))
+    }
+}
+
 impl std::fmt::Debug for Secret {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("Secret(***)")
@@ -139,7 +149,7 @@ impl Default for FetchConfig {
 pub(crate) async fn read_body_capped(resp: reqwest::Response, max_bytes: usize) -> Result<Vec<u8>> {
     let too_large = || Error::BodyTooLarge { max_bytes };
 
-    // P0 fix: Check Content-Length header before downloading the body.
+    // Check Content-Length before downloading the body.
     let content_length = resp
         .headers()
         .get(reqwest::header::CONTENT_LENGTH)
@@ -149,8 +159,8 @@ pub(crate) async fn read_body_capped(resp: reqwest::Response, max_bytes: usize) 
         return Err(too_large());
     }
 
-    // P0 fix: Stream the body with a running byte counter instead of
-    // buffering the entire response before checking the size.
+    // Stream the body with a running byte counter instead of buffering the
+    // entire response before checking the size.
     let mut body = Vec::with_capacity(content_length.unwrap_or(0).min(max_bytes));
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
