@@ -256,10 +256,40 @@ async fn ensure_public(
 
 fn utf8_text(body: Vec<u8>) -> Result<String> {
     let text = String::from_utf8(body).map_err(ex("content is not UTF-8 text"))?;
+    // Valid UTF-8 is not proof of text: a WebAssembly module header, for one,
+    // is valid UTF-8 with NUL bytes.
+    if text.contains('\0') {
+        return fail("content is binary");
+    }
     if text.trim().is_empty() {
         return fail("content is empty");
     }
     Ok(text)
+}
+
+/// The contents API answers a directory (and symlink or submodule) path with
+/// JSON metadata even when raw content was requested; that must not be passed
+/// off as the file's text.
+fn is_contents_metadata(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with(['[', '{']) {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+        return false;
+    };
+    let entry = |v: &Value| {
+        v.get("sha").is_some()
+            && v.get("path").is_some()
+            && matches!(
+                v.get("type").and_then(Value::as_str),
+                Some("file" | "dir" | "symlink" | "submodule")
+            )
+    };
+    match &value {
+        Value::Array(items) => !items.is_empty() && items.iter().all(entry),
+        other => entry(other) && other.get("type").and_then(Value::as_str) != Some("file"),
+    }
 }
 
 /// Wraps text in a code fence long enough that the text cannot close it.
@@ -324,10 +354,12 @@ pub(super) fn render_issue(issue: &Value, comments: &Value) -> String {
                 str_field(c, "body")
             );
         }
-        if list.len() >= COMMENTS_PER_PAGE {
+        let total = issue.get("comments").and_then(Value::as_u64).unwrap_or(0);
+        if total > list.len() as u64 {
             let _ = write!(
                 out,
-                "\n_Showing the first {COMMENTS_PER_PAGE} comments; later ones are omitted._\n"
+                "\n_Showing the first {} of {total} comments; later ones are omitted._\n",
+                list.len()
             );
         }
     }
@@ -353,6 +385,9 @@ pub(super) async fn extract_with_base(
             segs.extend(path.iter().map(String::as_str));
             let api = build_url(base, &segs, &[("ref", &git_ref)])?;
             let text = utf8_text(api_get(client, api, ACCEPT_RAW, config).await?)?;
+            if is_contents_metadata(&text) {
+                return fail("path is a directory, symlink or submodule, not a file");
+            }
             let name = path.join("/");
             let md = if name.to_ascii_lowercase().ends_with(".md") {
                 text.clone()
@@ -542,15 +577,36 @@ mod tests {
         assert!(!md.contains("omitted"));
     }
 
-    #[test]
-    fn full_comment_page_is_marked_truncated() {
-        let issue = serde_json::json!({"number": 1, "title": "t", "state": "open", "body": null, "user": null});
+    fn thread(total: u64, listed: usize) -> String {
+        let issue = serde_json::json!({"number": 1, "title": "t", "state": "open", "body": null, "user": null, "comments": total});
         let comments = Value::Array(
-            (0..COMMENTS_PER_PAGE)
+            (0..listed)
                 .map(|_| serde_json::json!({"user": null, "created_at": "d", "body": "x"}))
                 .collect(),
         );
-        assert!(render_issue(&issue, &comments).contains("later ones are omitted"));
+        render_issue(&issue, &comments)
+    }
+
+    #[test]
+    fn truncation_note_only_when_comments_are_really_missing() {
+        // Exactly one full page is a complete thread.
+        assert!(!thread(COMMENTS_PER_PAGE as u64, COMMENTS_PER_PAGE).contains("omitted"));
+        let cut = thread(150, COMMENTS_PER_PAGE);
+        assert!(cut.contains("first 100 of 150 comments"));
+        assert!(!thread(3, 3).contains("omitted"));
+    }
+
+    #[test]
+    fn detects_contents_api_metadata() {
+        let dir = r#"[{"type":"file","name":"a","path":"src/a","sha":"x"},{"type":"dir","name":"b","path":"src/b","sha":"y"}]"#;
+        assert!(is_contents_metadata(dir));
+        assert!(is_contents_metadata(r#"{"type":"symlink","path":"l","sha":"x","target":"t"}"#));
+        assert!(is_contents_metadata(r#"{"type":"submodule","path":"m","sha":"x"}"#));
+        // Real file contents that merely look like JSON are not metadata.
+        assert!(!is_contents_metadata(r#"{"name":"pkg","version":"1.0.0"}"#));
+        assert!(!is_contents_metadata("[1, 2, 3]"));
+        assert!(!is_contents_metadata("[]"));
+        assert!(!is_contents_metadata("plain text"));
     }
 
     #[test]
@@ -748,6 +804,33 @@ mod tests {
             !page.raw_html.contains("a@example.com"),
             "raw JSON fields must not be stored"
         );
+    }
+
+    #[tokio::test]
+    async fn directory_and_wasm_responses_fall_back() {
+        let (base, _) = fake_api(vec![
+            (
+                "/repos/o/r/contents/src",
+                200,
+                br#"[{"type":"file","name":"a.rs","path":"src/a.rs","sha":"x"}]"#,
+            ),
+            ("/repos/o/r/contents/m.wasm", 200, b"\0asm\x01\0\0\0"),
+            ("/repos/o/r/contents/package.json", 200, br#"{"name":"pkg"}"#),
+        ])
+        .await;
+        let c = Client::new();
+        for url in [
+            "https://github.com/o/r/blob/main/src",
+            "https://github.com/o/r/blob/main/m.wasm",
+        ] {
+            let err = extract_with_base(&base, &c, url, &cfg()).await.unwrap_err();
+            assert!(matches!(err, Error::Extractor(_)), "{url}: {err:?}");
+        }
+        // A genuine JSON file is still returned as a file.
+        let ok = extract_with_base(&base, &c, "https://github.com/o/r/blob/main/package.json", &cfg())
+            .await
+            .unwrap();
+        assert!(ok.markdown.contains("\"name\":\"pkg\""));
     }
 
     #[tokio::test]

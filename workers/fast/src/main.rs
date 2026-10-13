@@ -204,6 +204,15 @@ async fn main() -> anyhow::Result<()> {
                     _ => None,
                 });
 
+                let format = entry.map.get("format").and_then(|v| match v {
+                    redis::Value::BulkString(bytes) => Some(String::from_utf8_lossy(bytes).to_string()),
+                    _ => None,
+                });
+                let requested_strategy = requested_strategy
+                    .as_deref()
+                    .and_then(|s| extractors::strategy_for_format(Some(s), format.as_deref()))
+                    .map(str::to_string);
+
                 let permit = semaphore.clone().acquire_owned().await.unwrap();
                 let client = http_client.clone();
                 let cfg = config.clone();
