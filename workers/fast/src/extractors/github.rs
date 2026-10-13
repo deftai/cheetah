@@ -23,8 +23,10 @@ use reqwest::{Client, Url};
 use serde_json::Value;
 use std::fmt::Write as _;
 use std::net::IpAddr;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const API_BASE: &str = "https://api.github.com";
 const API_HOST: &str = "api.github.com";
@@ -40,8 +42,39 @@ const COMMENTS_PER_PAGE: usize = 100;
 /// job to the generic fetch for as long as it lasts.
 const MAX_COOLDOWN_SECS: u64 = 300;
 
+/// How long a repository stays trusted as public after the check. A repo that
+/// turns private is therefore blocked within this window, not instantly.
+const PUBLIC_CACHE_TTL: Duration = Duration::from_secs(300);
+const PUBLIC_CACHE_MAX: usize = 1024;
+
 /// Unix time before which API calls are skipped because GitHub rate limited us.
 static RATE_LIMITED_UNTIL: AtomicU64 = AtomicU64::new(0);
+
+/// Positive-only cache of repositories already confirmed public, which saves
+/// an API call (and rate-limit budget) per job when a token is configured.
+#[derive(Default)]
+struct PublicCache(Mutex<HashMap<String, Instant>>);
+
+impl PublicCache {
+    fn is_fresh(&self, key: &str, now: Instant) -> bool {
+        let map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        map.get(key)
+            .is_some_and(|at| now.saturating_duration_since(*at) < PUBLIC_CACHE_TTL)
+    }
+
+    fn insert(&self, key: String, now: Instant) {
+        let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if map.len() >= PUBLIC_CACHE_MAX {
+            map.retain(|_, at| now.saturating_duration_since(*at) < PUBLIC_CACHE_TTL);
+            if map.len() >= PUBLIC_CACHE_MAX {
+                map.clear();
+            }
+        }
+        map.insert(key, now);
+    }
+}
+
+static PUBLIC_REPOS: LazyLock<PublicCache> = LazyLock::new(PublicCache::default);
 
 #[derive(Debug, PartialEq)]
 pub(super) enum Kind {
@@ -206,10 +239,15 @@ async fn ensure_public(
     if config.github_token.is_none() {
         return Ok(());
     }
+    let key = format!("{owner}/{repo}").to_ascii_lowercase();
+    if PUBLIC_REPOS.is_fresh(&key, Instant::now()) {
+        return Ok(());
+    }
     let url = build_url(base, &["repos", owner, repo], &[])?;
     let body = api_get(client, url, ACCEPT_JSON, config).await?;
     let meta: Value = serde_json::from_slice(&body).map_err(ex("bad repository JSON"))?;
     if meta.get("private").and_then(Value::as_bool) == Some(false) {
+        PUBLIC_REPOS.insert(key, Instant::now());
         Ok(())
     } else {
         fail("repository is not public")
@@ -513,6 +551,43 @@ mod tests {
                 .collect(),
         );
         assert!(render_issue(&issue, &comments).contains("later ones are omitted"));
+    }
+
+    #[test]
+    fn public_cache_expires_and_is_bounded() {
+        let cache = PublicCache::default();
+        let t0 = Instant::now();
+        assert!(!cache.is_fresh("o/r", t0));
+        cache.insert("o/r".into(), t0);
+        assert!(cache.is_fresh("o/r", t0 + PUBLIC_CACHE_TTL - Duration::from_secs(1)));
+        assert!(!cache.is_fresh("o/r", t0 + PUBLIC_CACHE_TTL));
+        assert!(!cache.is_fresh("o/other", t0));
+        for i in 0..PUBLIC_CACHE_MAX + 50 {
+            cache.insert(format!("o/{i}"), t0);
+        }
+        assert!(cache.0.lock().unwrap().len() <= PUBLIC_CACHE_MAX);
+    }
+
+    #[tokio::test]
+    async fn public_check_is_cached_per_repo() {
+        let (base, seen) = fake_api(vec![
+            ("/repos/o/cached/readme", 200, b"x"),
+            ("/repos/o/cached", 200, br#"{"private":false}"#),
+        ])
+        .await;
+        let c = Client::new();
+        for _ in 0..3 {
+            extract_with_base(&base, &c, "https://github.com/o/cached", &with_token())
+                .await
+                .unwrap();
+        }
+        let checks = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.starts_with("GET /repos/o/cached HTTP"))
+            .count();
+        assert_eq!(checks, 1, "visibility should be checked once, then cached");
     }
 
     fn headers(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
