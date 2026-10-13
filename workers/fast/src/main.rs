@@ -42,6 +42,10 @@ struct ResultMetadata<'a> {
     fallback_from: Option<&'a str>,
 }
 
+fn parse_secret(s: &str) -> Result<Secret, std::convert::Infallible> {
+    Ok(Secret::new(s))
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "cheetah-fast", about = "Fast static page scraper worker")]
 struct Args {
@@ -60,9 +64,12 @@ struct Args {
     #[arg(long, default_value = "job_results")]
     results_prefix: String,
 
-    /// Optional GitHub API token; raises the GitHub extractor's rate limit.
-    #[arg(long, env = "GITHUB_TOKEN", hide_env_values = true)]
-    github_token: Option<String>,
+    /// Optional GitHub API token that raises the GitHub extractor's rate limit.
+    /// Prefer the GITHUB_TOKEN environment variable: a flag value is visible in
+    /// `ps`. Use a fine-grained read-only token; the extractor refuses
+    /// non-public repositories either way.
+    #[arg(long, env = "GITHUB_TOKEN", hide_env_values = true, value_parser = parse_secret)]
+    github_token: Option<Secret>,
 }
 
 #[tokio::main]
@@ -102,11 +109,7 @@ async fn main() -> anyhow::Result<()> {
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
     let config = Arc::new(FetchConfig {
-        github_token: args
-            .github_token
-            .as_deref()
-            .filter(|t| !t.is_empty())
-            .map(Secret::new),
+        github_token: args.github_token.filter(|t| !t.expose().is_empty()),
         ..FetchConfig::default()
     });
     let semaphore = Arc::new(Semaphore::new(args.concurrency));

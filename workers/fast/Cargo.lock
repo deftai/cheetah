@@ -239,6 +239,7 @@ dependencies = [
  "chrono",
  "clap",
  "futures-util",
+ "percent-encoding",
  "redis",
  "reqwest",
  "scraper",

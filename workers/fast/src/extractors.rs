@@ -152,9 +152,9 @@ mod tests {
     }
 
     #[test]
-    fn registry_knows_only_implemented_strategies() {
+    fn registry_resolves_known_strategies_only() {
         assert!(lookup("github_repo").is_some());
-        assert!(lookup("hn_thread").is_none());
+        assert!(lookup("no_such_strategy").is_none());
         assert!(lookup("").is_none());
     }
 

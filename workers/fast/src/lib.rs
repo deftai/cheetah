@@ -54,7 +54,7 @@ fn is_private_ip(ip: IpAddr) -> bool {
     }
 }
 
-pub(crate) async fn validate_url_ip(url: &str) -> Result<()> {
+async fn validate_url_ip(url: &str) -> Result<()> {
     let parsed = reqwest::Url::parse(url).map_err(|_| Error::SsrfBlocked)?;
     let host = parsed.host_str().ok_or(Error::SsrfBlocked)?;
     let port = parsed.port_or_known_default().unwrap_or(80);
@@ -134,6 +134,35 @@ impl Default for FetchConfig {
     }
 }
 
+/// Reads a response body, refusing anything over `max_bytes`: a declared
+/// Content-Length is checked up front, and the stream is counted as it arrives.
+pub(crate) async fn read_body_capped(resp: reqwest::Response, max_bytes: usize) -> Result<Vec<u8>> {
+    let too_large = || Error::BodyTooLarge { max_bytes };
+
+    // P0 fix: Check Content-Length header before downloading the body.
+    let content_length = resp
+        .headers()
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok());
+    if content_length.is_some_and(|len| len > max_bytes) {
+        return Err(too_large());
+    }
+
+    // P0 fix: Stream the body with a running byte counter instead of
+    // buffering the entire response before checking the size.
+    let mut body = Vec::with_capacity(content_length.unwrap_or(0).min(max_bytes));
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if body.len() + chunk.len() > max_bytes {
+            return Err(too_large());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 pub async fn fetch_page(
     client: &Client,
     url: &str,
@@ -169,38 +198,7 @@ pub async fn fetch_page(
 
     let status_code = resp.status().as_u16();
 
-    // P0 fix: Check Content-Length header before downloading the body.
-    let content_length = resp
-        .headers()
-        .get(reqwest::header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<usize>().ok());
-
-    if let Some(len) = content_length {
-        if len > config.max_body_size {
-            return Err(Error::BodyTooLarge {
-                max_bytes: config.max_body_size,
-            });
-        }
-    }
-
-    // P0 fix: Stream the body with a running byte counter instead of
-    // buffering the entire response before checking the size.
-    let capacity = content_length.unwrap_or(0).min(config.max_body_size);
-    let mut body = Vec::with_capacity(capacity);
-    let mut stream = resp.bytes_stream();
-    let mut total: usize = 0;
-
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        total += chunk.len();
-        if total > config.max_body_size {
-            return Err(Error::BodyTooLarge {
-                max_bytes: config.max_body_size,
-            });
-        }
-        body.extend_from_slice(&chunk);
-    }
+    let body = read_body_capped(resp, config.max_body_size).await?;
 
     let raw_html = String::from_utf8_lossy(&body).into_owned();
 
