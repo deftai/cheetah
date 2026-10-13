@@ -6,6 +6,8 @@
 //! The chain is straight-line, with at most one extractor attempt and one
 //! generic fetch, so it cannot loop.
 
+pub mod github;
+
 use crate::{fetch_page, FetchConfig, PageResult, Result};
 use futures_util::future::BoxFuture;
 use reqwest::Client;
@@ -25,8 +27,11 @@ pub type ExtractorFn = for<'a> fn(
 
 /// Extractor registry. Slices that add a platform register it here; an
 /// unregistered strategy is ignored and the page is fetched generically.
-pub fn lookup(_strategy: &str) -> Option<ExtractorFn> {
-    None
+pub fn lookup(strategy: &str) -> Option<ExtractorFn> {
+    match strategy {
+        "github_repo" => Some(github::extract),
+        _ => None,
+    }
 }
 
 #[derive(Debug)]
@@ -144,6 +149,13 @@ mod tests {
         )
         .await;
         (out, calls)
+    }
+
+    #[test]
+    fn registry_knows_only_implemented_strategies() {
+        assert!(lookup("github_repo").is_some());
+        assert!(lookup("hn_thread").is_none());
+        assert!(lookup("").is_none());
     }
 
     #[tokio::test]

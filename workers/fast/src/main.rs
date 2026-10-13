@@ -1,5 +1,5 @@
 use cheetah_fast::extractors::{self, generic_fetch};
-use cheetah_fast::FetchConfig;
+use cheetah_fast::{FetchConfig, Secret};
 use clap::Parser;
 use reqwest::Client;
 use serde::Serialize;
@@ -59,6 +59,10 @@ struct Args {
 
     #[arg(long, default_value = "job_results")]
     results_prefix: String,
+
+    /// Optional GitHub API token; raises the GitHub extractor's rate limit.
+    #[arg(long, env = "GITHUB_TOKEN", hide_env_values = true)]
+    github_token: Option<String>,
 }
 
 #[tokio::main]
@@ -97,7 +101,14 @@ async fn main() -> anyhow::Result<()> {
         .pool_max_idle_per_host(20)
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
-    let config = Arc::new(FetchConfig::default());
+    let config = Arc::new(FetchConfig {
+        github_token: args
+            .github_token
+            .as_deref()
+            .filter(|t| !t.is_empty())
+            .map(Secret::new),
+        ..FetchConfig::default()
+    });
     let semaphore = Arc::new(Semaphore::new(args.concurrency));
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);

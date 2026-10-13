@@ -18,6 +18,8 @@ pub enum Error {
     BodyTooLarge { max_bytes: usize },
     #[error("URL resolves to a private/reserved IP address")]
     SsrfBlocked,
+    #[error("extractor failed: {0}")]
+    Extractor(String),
 }
 
 fn is_private_ip(ip: IpAddr) -> bool {
@@ -52,7 +54,7 @@ fn is_private_ip(ip: IpAddr) -> bool {
     }
 }
 
-async fn validate_url_ip(url: &str) -> Result<()> {
+pub(crate) async fn validate_url_ip(url: &str) -> Result<()> {
     let parsed = reqwest::Url::parse(url).map_err(|_| Error::SsrfBlocked)?;
     let host = parsed.host_str().ok_or(Error::SsrfBlocked)?;
     let port = parsed.port_or_known_default().unwrap_or(80);
@@ -91,11 +93,34 @@ pub struct Metadata {
     pub og_url: Option<String>,
 }
 
+/// A credential whose `Debug` output is redacted so it cannot leak through
+/// `{:?}` logging of the config that holds it.
+#[derive(Clone)]
+pub struct Secret(String);
+
+impl Secret {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(***)")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FetchConfig {
     pub timeout: Duration,
     pub user_agent: String,
     pub max_body_size: usize,
+    /// Optional GitHub API token for the `github_repo` extractor.
+    pub github_token: Option<Secret>,
 }
 
 impl Default for FetchConfig {
@@ -104,6 +129,7 @@ impl Default for FetchConfig {
             timeout: Duration::from_secs(10),
             user_agent: "Mozilla/5.0 (compatible; Cheetah/1.0; +https://cheetah.dev/bot)".into(),
             max_body_size: 10 * 1024 * 1024,
+            github_token: None,
         }
     }
 }
