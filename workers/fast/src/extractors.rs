@@ -45,12 +45,20 @@ fn one_line(s: &str) -> String {
         .collect()
 }
 
-/// Backslash-escapes the inline Markdown specials (links, images, HTML, code
-/// spans, emphasis) so third-party text placed in a live line renders as text.
+/// Backslash-escapes what could turn third-party text in a live Markdown line
+/// into a link, image, HTML, code span or emphasis: the usual inline specials,
+/// plus the triggers of GFM autolink literals (`://`, `www.` and `@`).
 fn escape_inline(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        if matches!(c, '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>') {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len() + 8);
+    for (i, &c) in chars.iter().enumerate() {
+        let escape = match c {
+            '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '@' => true,
+            ':' => chars.get(i + 1) == Some(&'/') && chars.get(i + 2) == Some(&'/'),
+            '.' => i >= 3 && chars[i - 3..i].iter().collect::<String>().eq_ignore_ascii_case("www"),
+            _ => false,
+        };
+        if escape {
             out.push('\\');
         }
         out.push(c);
