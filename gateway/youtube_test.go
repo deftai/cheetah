@@ -221,8 +221,12 @@ func TestLoadTranscriptWorker(t *testing.T) {
 }
 
 func transcriptApp(enabled bool) *fiber.App {
+	return transcriptAppWithRedis(enabled, "localhost:6379")
+}
+
+func transcriptAppWithRedis(enabled bool, redisAddr string) *fiber.App {
 	cfg := Config{
-		RedisURL:         "localhost:6379",
+		RedisURL:         redisAddr,
 		APIKeys:          []string{"test-key-123"},
 		Port:             "3000",
 		TranscriptWorker: enabled,
@@ -331,17 +335,24 @@ func TestExtractTranscriptRejectsBadInput(t *testing.T) {
 }
 
 func TestExtractTranscriptValidRequestReachesDNSAndQueueStages(t *testing.T) {
-	// A valid request gets past every pure check and on to the stages that need
-	// the network. Where this test runs those stages may not be reachable, so each
-	// of the three real outcomes is accepted, and nothing else: the call
-	// succeeds, or it fails resolving the host (no DNS), or it fails enqueueing
-	// (no Redis). Any other text, including an empty one or a new refusal
-	// message, means the request was turned away before it got that far.
-	text, isErr := callTranscript(t, true, map[string]interface{}{"url": "https://youtu.be/" + ytID + "?t=5", "language": "ko-orig"})
+	// A valid request gets past every pure check and on to the two stages that
+	// need the network. The queue is pointed at a port nothing listens on, so the
+	// test never enqueues a real job into a developer's Redis and its outcome does
+	// not depend on one being up. The outcome then depends only on DNS: no DNS,
+	// a name that resolves to a private address (sinkhole, split-horizon, a hosts
+	// override), or working DNS and a failed enqueue. Anything else, including an
+	// empty text or a new refusal message, means the request was turned away
+	// before it got that far.
+	body := mcpRequest("tools/call", 41, map[string]interface{}{
+		"name":      "extract_transcript",
+		"arguments": map[string]interface{}{"url": "https://youtu.be/" + ytID + "?t=5", "language": "ko-orig"},
+	})
+	_, result := postMCP(t, transcriptAppWithRedis(true, "127.0.0.1:1"), body)
+	text, isErr := toolResultText(t, result)
 	switch {
-	case !isErr && strings.Contains(text, `"job_id"`) && strings.Contains(text, `"video_id":"`+ytID+`"`):
-	case isErr && strings.Contains(text, "cannot resolve hostname"):
-	case isErr && text == "failed to enqueue job":
+	case isErr && strings.Contains(text, "cannot resolve hostname"): // no DNS
+	case isErr && strings.Contains(text, "private or reserved IP address"): // DNS answer rejected
+	case isErr && text == "failed to enqueue job": // DNS fine, Redis unreachable by design
 	default:
 		t.Fatalf("unexpected outcome for a valid request: isError=%v %q", isErr, text)
 	}
