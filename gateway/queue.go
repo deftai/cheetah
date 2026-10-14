@@ -56,6 +56,27 @@ func effectiveTTL(requested time.Duration) time.Duration {
 	return requested
 }
 
+// scrapeStreamValues builds the stream entry for a scrape-style job. The
+// transcript fields are added only when set, so entries for every other stream
+// keep exactly the shape they had.
+func scrapeStreamValues(jobID string, req ScrapeRequest, payload string) map[string]interface{} {
+	values := map[string]interface{}{
+		"job_id":      jobID,
+		"url":         req.URL,
+		"format":      req.Format,
+		"resolved_ip": req.ResolvedIP,
+		"strategy":    req.Strategy,
+		"payload":     payload,
+	}
+	if req.VideoID != "" {
+		values["video_id"] = req.VideoID
+	}
+	if req.Language != "" {
+		values["language"] = req.Language
+	}
+	return values
+}
+
 func (q *QueueClient) EnqueueScrape(ctx context.Context, req ScrapeRequest, owner string, stream ...string) (string, error) {
 	jobID := uuid.New().String()
 
@@ -73,14 +94,7 @@ func (q *QueueClient) EnqueueScrape(ctx context.Context, req ScrapeRequest, owne
 		Stream: targetStream,
 		MaxLen: streamMaxLen,
 		Approx: true,
-		Values: map[string]interface{}{
-			"job_id":      jobID,
-			"url":         req.URL,
-			"format":      req.Format,
-			"resolved_ip": req.ResolvedIP,
-			"strategy":    req.Strategy,
-			"payload":     string(payload),
-		},
+		Values: scrapeStreamValues(jobID, req, string(payload)),
 	}).Err()
 	if err != nil {
 		return "", fmt.Errorf("enqueue scrape job: %w", err)
