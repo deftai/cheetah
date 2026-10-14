@@ -2,7 +2,6 @@ package main
 
 import (
 	"net"
-	"net/url"
 	"strings"
 	"testing"
 )
@@ -146,6 +145,8 @@ func TestParseSubmittedURL(t *testing.T) {
 		{"userinfo with fragment", "https://a@github.com#@evil.example/o/r", ""},
 		{"backslash authority", `https://github.com\@evil.example/o/r`, ""},
 		{"backslash path", `https://example.com/a\b`, ""},
+		{"backslash in query", `https://example.com/s?q=a\b`, "example.com"},
+		{"backslash in fragment", `https://example.com/s#a\b`, "example.com"},
 		{"fragment directly after host", "https://example.com#top", ""},
 		{"fragment colon port", "https://github.com#:80@evil.example/", ""},
 	}
@@ -168,34 +169,47 @@ func TestParseSubmittedURL(t *testing.T) {
 	}
 }
 
-// Classified host must equal the validated (pinned) host, or the URL is rejected.
-func TestClassifyAndValidateAgreeOnHost(t *testing.T) {
+// Classification must never pick a platform strategy for a URL the validator
+// rejects, and must classify accepted URLs by the validated host.
+func TestClassifyUsesValidatedHost(t *testing.T) {
 	for _, raw := range []string{
 		"https://github.com#@evil.example/o/r",
-		"https://github.com?@evil.example/o/r",
-		"https://github.com/o/r?x=@evil.example",
+		"https://github.com#@evil.example",
 		`https://github.com\@evil.example/o/r`,
+		"https://u@github.com#@evil.example/o/r",
+	} {
+		if _, err := parseSubmittedURL(raw); err == nil {
+			t.Errorf("%q should be rejected", raw)
+		}
+		if d := ClassifyURL(raw); d.Strategy != "" {
+			t.Errorf("%q rejected by validator but classified with strategy %q", raw, d.Strategy)
+		}
+	}
+	for _, raw := range []string{
+		"https://github.com?@evil.example/o/r", // host github.com, but no owner/repo path
 		"https://u@github.com:443/o/r",
 	} {
-		a, errA := parseSubmittedURL(raw) // what ValidateScrapeURL uses
-		if errA != nil {
-			if d := ClassifyURL(raw); d.Strategy != "" {
-				t.Errorf("%q rejected by validator but classified with strategy %q", raw, d.Strategy)
-			}
-			continue
+		u, err := parseSubmittedURL(raw)
+		if err != nil || u.Hostname() != "github.com" {
+			t.Errorf("%q: host=%v err=%v, want github.com", raw, u, err)
 		}
-		if b, _ := url.ParseRequestURI(raw); b.Hostname() != a.Hostname() {
-			t.Errorf("%q: validator host %q != classifier host %q", raw, b.Hostname(), a.Hostname())
-		}
+	}
+	if d := ClassifyURL("https://u@github.com:443/o/r"); d.Strategy != StrategyGitHubRepo {
+		t.Errorf("accepted github URL: strategy %q, want %q", d.Strategy, StrategyGitHubRepo)
 	}
 }
 
 func TestParseSubmittedURLErrorOmitsCredentials(t *testing.T) {
-	_, err := parseSubmittedURL("https://user:s3cret@example.com:99999x/")
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if strings.Contains(err.Error(), "s3cret") {
-		t.Fatalf("error leaks credentials: %v", err)
+	for _, raw := range []string{
+		"https://user:s3cret@example.com:99999x/", // fails url.Parse
+		"s3cret@example.com",                      // passes url.Parse, fails url.ParseRequestURI
+	} {
+		_, err := parseSubmittedURL(raw)
+		if err == nil {
+			t.Fatalf("%q: expected error", raw)
+		}
+		if strings.Contains(err.Error(), "s3cret") {
+			t.Fatalf("%q: error leaks credentials: %v", raw, err)
+		}
 	}
 }

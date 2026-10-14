@@ -14,9 +14,11 @@ import (
 // while url.ParseRequestURI does not, so inputs such as
 // "https://github.com#@evil.example/o/r" yield different hosts. Such URLs are
 // ambiguous (other HTTP clients may disagree too) and are rejected: the URL
-// must parse identically under both parsers, and contain no backslashes.
+// must parse identically under both parsers, and its authority/path (the part
+// before any query or fragment) must contain no backslashes, which WHATWG-style
+// clients treat as "/".
 func parseSubmittedURL(rawURL string) (*url.URL, error) {
-	if strings.ContainsRune(rawURL, '\\') {
+	if strings.ContainsRune(beforeQueryOrFragment(rawURL), '\\') {
 		return nil, errors.New("url contains backslash")
 	}
 	u, err := url.Parse(rawURL)
@@ -31,6 +33,13 @@ func parseSubmittedURL(rawURL string) (*url.URL, error) {
 		return nil, errors.New("ambiguous url authority")
 	}
 	return u, nil
+}
+
+func beforeQueryOrFragment(rawURL string) string {
+	if i := strings.IndexAny(rawURL, "?#"); i >= 0 {
+		return rawURL[:i]
+	}
+	return rawURL
 }
 
 // ValidateScrapeURL validates that rawURL is safe for server-side fetching.
