@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
+	"strconv"
+	"strings"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -289,17 +292,91 @@ var platformTools = map[string]platformTool{
 	},
 }
 
-// platformToolError returns "" when decision is a URL the tool serves, and
+// platformToolOrder fixes the order platformTools is searched in, so error
+// hints are deterministic.
+var platformToolOrder = []string{"get_repository_content", "get_thread"}
+
+func isDigits(s string, maxLen int) bool {
+	if s == "" || len(s) > maxLen {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func validGitHubName(s string) bool {
+	if s == "" || len(s) > 100 || s == "." || s == ".." {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// platformURLSupported reports whether rawURL is a page the strategy's
+// extractor handles. It mirrors the worker's own URL rules (workers/fast
+// extractors), so a URL the worker would only fall back on is refused here
+// with a clear error instead of being reported as extracted.
+func platformURLSupported(strategy, rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme != "https" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	switch strategy {
+	case StrategyGitHubRepo:
+		if host != "github.com" && host != "www.github.com" {
+			return false
+		}
+		var segs []string
+		for _, p := range strings.Split(u.Path, "/") {
+			if p != "" {
+				segs = append(segs, p)
+			}
+		}
+		if len(segs) < 2 || !validGitHubName(segs[0]) || !validGitHubName(strings.TrimSuffix(segs[1], ".git")) {
+			return false
+		}
+		rest := segs[2:]
+		switch {
+		case len(rest) == 0:
+			return true
+		case rest[0] == "blob":
+			// /blob/<ref>/<path...>; a trailing slash names a directory.
+			return len(rest) >= 3 && !strings.HasSuffix(u.Path, "/")
+		case (rest[0] == "issues" || rest[0] == "pull") && len(rest) == 2:
+			_, err := strconv.ParseUint(rest[1], 10, 64)
+			return isDigits(rest[1], 20) && err == nil
+		}
+		return false
+	case StrategyHNThread:
+		return host == "news.ycombinator.com" && u.Path == "/item" && isDigits(u.Query().Get("id"), 10)
+	}
+	return false
+}
+
+// platformToolError returns "" when the URL is one the tool serves, and
 // otherwise a message saying what the tool accepts and where the URL belongs.
 // It never repeats the submitted URL, which may carry credentials in its query.
-func platformToolError(tool string, decision RouteDecision) string {
+func platformToolError(tool, rawURL string, decision RouteDecision) string {
 	spec := platformTools[tool]
 	if decision.Strategy == spec.strategy {
-		return ""
+		if platformURLSupported(spec.strategy, rawURL) {
+			return ""
+		}
+		return fmt.Sprintf("%s only accepts %s; this page type or URL form is not supported, use \"scrape\" for it", tool, spec.accepts)
 	}
 	hint := `use "scrape" for other pages`
-	for other, o := range platformTools {
-		if other != tool && decision.Strategy == o.strategy {
+	for _, other := range platformToolOrder {
+		if other != tool && decision.Strategy == platformTools[other].strategy {
 			hint = fmt.Sprintf("this URL belongs to %q", other)
 			break
 		}
@@ -318,7 +395,7 @@ func mcpPlatformTool(c *fiber.Ctx, rpc jsonrpcRequest, params toolCallParams, qu
 	// The platform check is a pure classification, so a wrong-platform URL is
 	// refused before any DNS lookup or queue access.
 	decision := ClassifyURL(args.URL)
-	if msg := platformToolError(params.Name, decision); msg != "" {
+	if msg := platformToolError(params.Name, args.URL, decision); msg != "" {
 		return mcpToolError(c, rpc, msg)
 	}
 

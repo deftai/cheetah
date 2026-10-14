@@ -442,10 +442,29 @@ func TestPlatformToolError(t *testing.T) {
 		{"get_thread", "https://news.ycombinator.com/", `use "scrape"`},
 		{"get_thread", "https://news.ycombinator.com/item?id=abc", `use "scrape"`},
 		{"get_thread", "not a url", `use "scrape"`},
+		// Host tricks: the platform is the URL's real host, not text elsewhere in it.
+		{"get_repository_content", "https://github.com@evil.example/o/r", `use "scrape"`},
+		{"get_repository_content", "https://evil.example/?x=github.com/o/r", `use "scrape"`},
+		{"get_thread", "https://evil.example/item?id=1&r=news.ycombinator.com", `use "scrape"`},
+		{"get_repository_content", "https://GitHub.COM/o/r", ""},
+		{"get_repository_content", "https://www.github.com/o/r.git", ""},
+		{"get_repository_content", "https://github.com:8443/o/r", ""},
+		{"get_repository_content", "https://github.com/o/r/pull/12", ""},
+		// Right platform, but a page the extractor does not handle: refused, not silently scraped.
+		{"get_repository_content", "http://github.com/o/r", "not supported"},
+		{"get_repository_content", "https://github.com/o/r/tree/main/docs", "not supported"},
+		{"get_repository_content", "https://github.com/o/r/issues", "not supported"},
+		{"get_repository_content", "https://github.com/o/r/issues/5/extra", "not supported"},
+		{"get_repository_content", "https://github.com/o/r/issues/abc", "not supported"},
+		{"get_repository_content", "https://github.com/o/r/blob/main", "not supported"},
+		{"get_repository_content", "https://github.com/o/r/blob/main/src/", "not supported"},
+		{"get_repository_content", "https://github.com/o/r/actions/runs/1", "not supported"},
+		{"get_thread", "http://news.ycombinator.com/item?id=1", "not supported"},
+		{"get_thread", "https://news.ycombinator.com/item?id=12345678901", "not supported"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.tool+" "+tt.url, func(t *testing.T) {
-			got := platformToolError(tt.tool, ClassifyURL(tt.url))
+			got := platformToolError(tt.tool, tt.url, ClassifyURL(tt.url))
 			if tt.want == "" {
 				if got != "" {
 					t.Fatalf("expected %s to be accepted, got %q", tt.url, got)
