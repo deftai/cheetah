@@ -474,7 +474,8 @@ func TestPlatformToolError(t *testing.T) {
 		{"get_repository_content", "https://github.com/o/r/blob/main/.", "not supported"},
 		{"get_repository_content", "https://github.com/o/r/blob/main/%2e%2E/x", "not supported"},
 		{"get_repository_content", "https://github.com/o/r/blob/../x/y", "not supported"},
-		{"get_repository_content", `https://github.com/o/r/blob/main/a\b`, "not supported"},
+		// A backslash in the path is rejected earlier, by the shared URL parse, as malformed.
+		{"get_repository_content", `https://github.com/o/r/blob/main/a\b`, "only accepts"},
 		{"get_repository_content", "https://github.com:99999/o/r", "not supported"},
 		{"get_thread", "https://news.ycombinator.com/%69tem?id=1", "not supported"},
 		{"get_thread", "https://news.ycombinator.com/item?id=%zz&id=5", "not supported"},
