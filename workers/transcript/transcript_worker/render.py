@@ -4,38 +4,63 @@ Same construction as the Hacker News extractor: captions are third-party text,
 so they are written inside a code fence that no backtick run in the text can
 close, with every line-break character normalised and control characters
 blanked. Escaping Markdown shapes one by one is a losing game; inside a fence
-none of them is parsed. Only our own lines (title, track description, link,
-timestamps' fence) are live Markdown, and those are forced onto one line and
+none of them is parsed. Only our own lines (the title, the track description
+and the link) are live Markdown, and those are forced onto one line and
 inline-escaped, or built from validated values.
 """
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from collections.abc import Sequence
 
+from . import errors
 from .captions import Cue
 from .validators import canonical_url, valid_language_tag, valid_video_id
 
 MAX_OUTPUT_BYTES = 1024 * 1024
 MAX_TITLE_CHARS = 300
 DEFAULT_CHUNK_SECONDS = 15.0
+# A line also closes once it holds this much text, so cues that share one
+# timestamp cannot become a single line that the size cap keeps or drops whole.
+MAX_CHUNK_CHARS = 2000
 
-_LINE_BREAKS = frozenset("\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029")
+_LINE_BREAKS = "\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
 # Bidirectional controls can make text display in a different order than it reads.
-_BIDI = frozenset("\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+_BIDI = "\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
 _KIND_LABEL = {
     "manual": "captions written by the video's creator",
     "auto": "auto-generated captions",
     "translated": "machine-translated captions",
 }
+_TICKS = re.compile("`+")
+
+
+def _fence_translation() -> dict[int, str]:
+    """Per-character rules for text inside the fence: control characters (C0 and
+    C1) and bidi controls become spaces, every line-break character becomes
+    `\\n`, and `\\t` and `\\n` stay. A `str.translate` table runs in C; a Python
+    loop over each character was the cost of rendering a 5 MiB transcript."""
+    table = {o: " " for o in (*range(0x20), *range(0x7F, 0xA0))}
+    table.update({ord(c): " " for c in _BIDI})
+    table.update({ord(c): "\n" for c in _LINE_BREAKS})
+    del table[ord("\t")], table[ord("\n")]
+    return table
+
+
+_FENCE_TABLE = _fence_translation()
+
+
+def _utf8_safe(s: str) -> str:
+    """Lone surrogates (from a JSON `\\ud800`) cannot be UTF-8 encoded; they
+    become `?` instead of crashing the job."""
+    return s.encode("utf-8", "replace").decode("utf-8")
 
 
 def one_line(s: str) -> str:
     """Control characters (newlines included) and U+2028/2029 become spaces."""
-    return "".join(
-        " " if (unicodedata.category(c) == "Cc" or c in "\u2028\u2029") else c for c in s
-    )
+    return "".join(" " if (unicodedata.category(c) == "Cc" or c in "\u2028\u2029") else c for c in s)
 
 
 def escape_inline(s: str) -> str:
@@ -59,37 +84,16 @@ def escape_inline(s: str) -> str:
 
 
 def _clean_for_fence(text: str) -> str:
-    text = text.replace("\r\n", "\n")
-    out: list[str] = []
-    for c in text:
-        if c in _LINE_BREAKS:
-            out.append("\n")
-        elif c in "\n\t":
-            out.append(c)
-        elif unicodedata.category(c) == "Cc" or c in _BIDI:
-            out.append(" ")
-        else:
-            out.append(c)
-    return "".join(out)
+    return _utf8_safe(text).replace("\r\n", "\n").translate(_FENCE_TABLE)
 
 
-def fenced_block(text: str, spaces: int = 0) -> str:
-    """`text` as an inert fenced block, `spaces` deep, ending in a newline."""
-    pad = " " * spaces
-    clean = _clean_for_fence(text)
-    longest = run = 0
-    for c in clean:
-        if c == "`":
-            run += 1
-            longest = max(longest, run)
-        else:
-            run = 0
-    fence = "`" * (max(longest, 2) + 1)
-    lines = [pad + fence]
-    for line in clean.strip("\n").split("\n"):
-        lines.append(pad + line if line else "")
-    lines.append(pad + fence)
-    return "\n".join(lines) + "\n"
+def _fence_for(longest_backtick_run: int) -> str:
+    """A fence longer than any backtick run in the text, so it cannot close it."""
+    return "`" * (max(longest_backtick_run, 2) + 1)
+
+
+def _longest_run(s: str) -> int:
+    return max((len(m) for m in _TICKS.findall(s)), default=0)
 
 
 def format_timestamp(seconds: float) -> str:
@@ -100,32 +104,27 @@ def format_timestamp(seconds: float) -> str:
 
 
 def chunk_cues(cues: Sequence[Cue], chunk_seconds: float = DEFAULT_CHUNK_SECONDS) -> list[tuple[float, str]]:
-    """Joins consecutive cues into lines that each span about `chunk_seconds`."""
+    """Joins consecutive cues into lines that each span about `chunk_seconds`
+    and hold about `MAX_CHUNK_CHARS` characters at most."""
     chunks: list[tuple[float, str]] = []
     start = 0.0
     parts: list[str] = []
+    chars = 0
     for cue in cues:
-        if parts and cue.start - start >= chunk_seconds:
+        if parts and (cue.start - start >= chunk_seconds or chars >= MAX_CHUNK_CHARS):
             chunks.append((start, " ".join(parts)))
-            parts = []
+            parts, chars = [], 0
         if not parts:
             start = cue.start
         parts.append(cue.text)
+        chars += len(cue.text) + 1
     if parts:
         chunks.append((start, " ".join(parts)))
     return chunks
 
 
-def _body(chunks: Sequence[tuple[float, str]]) -> str:
-    return "\n".join(f"{format_timestamp(t)} {text}" for t, text in chunks)
-
-
-def _assemble(header: str, chunks: Sequence[tuple[float, str]], total: int) -> str:
-    out = header + fenced_block(_body(chunks))
-    if len(chunks) < total:
-        shown = format_timestamp(chunks[-1][0]) if chunks else "the start"
-        out += f"\n_Transcript cut off after {shown} to stay within the size limit._\n"
-    return out
+def _cut_off_note(last_kept_start: float) -> str:
+    return f"\n_Transcript cut off after {format_timestamp(last_kept_start)} to stay within the size limit._\n"
 
 
 def render_transcript(
@@ -140,31 +139,62 @@ def render_transcript(
 ) -> str:
     """The transcript as Markdown, at most `max_bytes` UTF-8 bytes.
 
-    `video_id`, `kind` and `language` must already be validated; a bad value is a
-    programming error and raises ValueError rather than reaching live Markdown.
+    Too long a transcript is cut off at a line boundary, with a note. If not even
+    the header and one line fit, it raises TranscriptError(internal) rather than
+    return an empty transcript. `video_id`, `kind` and `language` must already be
+    validated; a bad value is a programming error and raises ValueError rather
+    than reaching live Markdown.
     """
     if not valid_video_id(video_id) or kind not in _KIND_LABEL or not valid_language_tag(language):
         raise ValueError("invalid transcript header value")
-    shown_title = escape_inline(one_line(title)[:MAX_TITLE_CHARS].strip()) or "YouTube video"
+    shown_title = escape_inline(one_line(_utf8_safe(title)[:MAX_TITLE_CHARS]).strip()) or "YouTube video"
     header = (
         f"# {shown_title}\n\n"
         f"Transcript: {_KIND_LABEL[kind]}, language {language}\n\n"
         f"Video: <{canonical_url(video_id)}>\n\n"
     )
     chunks = chunk_cues(cues, chunk_seconds)
+    lines = [_clean_for_fence(f"{format_timestamp(t)} {text}").strip("\n") for t, text in chunks]
+    total = len(lines)
+
+    # One pass gives the byte size and longest backtick run of every prefix, so
+    # each size question below is O(1): no re-cleaning, no re-encoding.
+    body_bytes: list[int] = []
+    longest: list[int] = []
+    cum = run = 0
+    for i, line in enumerate(lines):
+        cum += len(line.encode("utf-8")) + (1 if i else 0)
+        run = max(run, _longest_run(line))
+        body_bytes.append(cum)
+        longest.append(run)
+    header_bytes = len(header.encode("utf-8"))
 
     def size(n: int) -> int:
-        return len(_assemble(header, chunks[:n], len(chunks)).encode("utf-8"))
+        """Exact byte size of the output that keeps the first `n` lines."""
+        fence_len = len(_fence_for(longest[n - 1] if n else 0))
+        out = header_bytes + 2 * (fence_len + 1) + (body_bytes[n - 1] + 1 if n else 0)
+        if n < total:
+            out += len(_cut_off_note(chunks[n - 1][0]).encode("utf-8"))
+        return out
 
-    if size(len(chunks)) <= max_bytes:
-        return _assemble(header, chunks, len(chunks))
-    # Largest prefix that fits. Size only grows with n (a longer text can only
-    # lengthen the fence), so a binary search is sound.
-    lo, hi = 0, len(chunks)
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        if size(mid) <= max_bytes:
-            lo = mid
-        else:
-            hi = mid - 1
-    return _assemble(header, chunks[:lo], len(chunks))
+    if size(total) <= max_bytes:
+        keep = total
+    else:
+        # The largest prefix that fits. Size only grows with n (more text, a
+        # fence that can only lengthen), so a binary search is sound.
+        lo, hi = 0, total - 1
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if size(mid) <= max_bytes:
+                lo = mid
+            else:
+                hi = mid - 1
+        keep = lo
+        if keep == 0:
+            raise errors.internal("output_too_large")
+
+    fence = _fence_for(longest[keep - 1] if keep else 0)
+    out = header + fence + "\n" + "\n".join(lines[:keep]) + ("\n" if keep else "") + fence + "\n"
+    if keep < total:
+        out += _cut_off_note(chunks[keep - 1][0])
+    return out

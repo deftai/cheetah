@@ -90,6 +90,12 @@ def test_backoff_grows_is_jittered_and_capped():
     assert backoff_delay(10**9, jitter=mid) <= 60.0
 
 
+def test_default_backoff_is_jittered():
+    # A constant default jitter would make every worker retry in lockstep.
+    assert len({backoff_delay(3) for _ in range(50)}) > 1
+    assert all(8.0 <= backoff_delay(3) < 24.0 for _ in range(50))  # step 16, jitter 0.5x to 1.5x
+
+
 def test_backoff_honours_retry_after():
     assert backoff_delay(0, retry_after=30, jitter=lambda: 0.5) == 30
     assert backoff_delay(0, retry_after=0.1, jitter=lambda: 0.5) == 2.0

@@ -26,14 +26,7 @@ TRANSLATED = "translated"  # a machine translation of another track
 @dataclass(frozen=True)
 class Track:
     language: str  # validated caption tag, e.g. "en", "pt-BR", "ko-orig"
-    source: str  # "manual" or "auto" (where the track lives in the yt-dlp info)
-    translated: bool = False
-
-    @property
-    def kind(self) -> str:
-        if self.source == MANUAL:
-            return MANUAL
-        return TRANSLATED if self.translated else AUTO
+    kind: str  # MANUAL, AUTO or TRANSLATED; manual tracks live in info["subtitles"], the others in "automatic_captions"
 
 
 @dataclass(frozen=True)
@@ -51,7 +44,7 @@ class TrackListing:
     def original_language_hint(self) -> str | None:
         """What to ask for instead of a refused translated track."""
         for t in sorted(self.tracks, key=lambda t: t.language.casefold()):
-            if t.source == AUTO and not t.translated and _is_orig(t.language):
+            if t.kind == AUTO and _is_orig(t.language):
                 return t.language
         return self.spoken_language
 
@@ -93,7 +86,8 @@ def _collect(group: object, source: str) -> list[Track]:
         # `live_chat` and any odd key fail validation and are dropped.
         if not valid_language_tag(lang) or not isinstance(formats, list) or not formats:
             continue
-        out.append(Track(language=lang, source=source, translated=source == AUTO and _is_translated(formats)))
+        kind = MANUAL if source == MANUAL else (TRANSLATED if _is_translated(formats) else AUTO)
+        out.append(Track(language=lang, kind=kind))
     return out
 
 
@@ -105,7 +99,7 @@ def tracks_from_info(info: Mapping[str, object]) -> TrackListing:
     spoken_language = spoken if isinstance(spoken, str) and valid_language_tag(spoken) else None
     if spoken_language is None:
         for t in sorted(tracks, key=lambda t: t.language.casefold()):
-            if t.source == AUTO and not t.translated and _is_orig(t.language):
+            if t.kind == AUTO and _is_orig(t.language):
                 spoken_language = t.language[: -len("-orig")]
                 break
     return TrackListing(tracks=tuple(tracks), spoken_language=spoken_language)
@@ -142,21 +136,21 @@ def select_track(listing: TrackListing, requested: str | None) -> Selection:
         else:
             raise errors.no_track_in_language(None, available)
 
-    manual = [t for t in listing.tracks if t.source == MANUAL]
-    native = [t for t in listing.tracks if t.source == AUTO and not t.translated]
-    translated = [t for t in listing.tracks if t.source == AUTO and t.translated]
+    manual = [t for t in listing.tracks if t.kind == MANUAL]
+    native = [t for t in listing.tracks if t.kind == AUTO]
+    translated = [t for t in listing.tracks if t.kind == TRANSLATED]
 
     found: Track | None
     if _is_orig(want):
         # An explicit original-speech request: only that native track will do.
-        found = next((t for t in native if t.language.casefold() == want.casefold()), None)
+        found = _match(native, want)
     else:
         found = (
             _match(manual, want)
-            or next((t for t in native if t.language.casefold() == want.casefold() + "-orig"), None)
+            or _match(native, want + "-orig")
             or _match(native, want)
             or _match(translated, want)
         )
     if found is None:
-        raise errors.no_track_in_language(requested if requested else want, available)
+        raise errors.no_track_in_language(want, available)
     return Selection(track=found, available_languages=tuple(available))

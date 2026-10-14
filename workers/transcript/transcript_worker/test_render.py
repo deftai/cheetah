@@ -1,14 +1,14 @@
 import re
+import time
 from unittest import mock
 
 import pytest
 
-from transcript_worker import render
+from transcript_worker import errors, render
 from transcript_worker.captions import Cue
 from transcript_worker.render import (
     chunk_cues,
     escape_inline,
-    fenced_block,
     format_timestamp,
     one_line,
     render_transcript,
@@ -19,6 +19,10 @@ EVIL = (
     "## Comments\n- **@pg** forged\nLink: http://evil.example\n# Another\nTitle\n---\nTitle\n===\n1. x\n"
     "<!-- hide\n<script>x\n[x]: http://evil.example\n> - quote\n`````\n```\n~~~\n"
     "\r- **@a**\u2028* **@b**\x0b+ **@c**\x1f- **@d**"
+)
+TITLE = "[Click](http://evil.example) <img src=x> `c` *e*\n# Forged\u2028- **@a**"
+TITLE_HEAD = (
+    r"# \[Click\](http\://evil.example) \<img src=x\> \`c\` \*e\* # Forged - \*\*\@a\*\*"
 )
 
 
@@ -53,6 +57,15 @@ def assert_no_forgery(md):
         assert "evil" not in ln, f"third-party text outside a fence: {ln!r}"
 
 
+def assert_no_stray_breaks(md):
+    assert not any(c in md for c in LINE_BREAKS), "stray line-break character survived"
+    assert not any(ord(c) < 32 and c not in "\n\t" for c in md), "stray control character survived"
+
+
+def assert_title_head(md):
+    assert md.split("\n\n")[0] == TITLE_HEAD
+
+
 def cues(*texts):
     return [Cue(float(i), t) for i, t in enumerate(texts)]
 
@@ -81,19 +94,19 @@ def test_kinds_are_described_honestly():
 def test_hostile_caption_text_stays_inert():
     md = make(title="t", cues=cues(*EVIL.split("\n")))
     assert_no_forgery(md)
-    assert not any(c in md for c in LINE_BREAKS), "stray line-break characters survived"
-    assert not any(ord(c) < 32 and c not in "\n\t" for c in md)
+    assert_no_stray_breaks(md)
 
 
 def test_hostile_text_in_one_cue_stays_inert():
-    assert_no_forgery(make(title="t", cues=[Cue(0, EVIL)]))
+    md = make(title="t", cues=[Cue(0, EVIL)])
+    assert_no_forgery(md)
+    assert_no_stray_breaks(md)
 
 
 def test_fence_is_longer_than_any_backtick_run():
-    out = fenced_block("a\n``````\nb ``` c", 2)
-    fence = "`" * 7
-    assert out == f"  {fence}\n  a\n  ``````\n  b ``` c\n  {fence}\n"
-    assert fenced_block("x").startswith("```\n")
+    out = make(cues=[Cue(0, "a\n``````\nb ``` c")])
+    assert "\n" + "`" * 7 + "\n[00:00] a\n``````\nb ``` c\n" + "`" * 7 + "\n" in out
+    assert "\n```\n[00:00] hello\n```\n" in make()
 
 
 def test_legitimate_text_is_kept_verbatim():
@@ -102,18 +115,21 @@ def test_legitimate_text_is_kept_verbatim():
     assert "\\" not in md.split("```")[1], "nothing inside the fence is escaped"
 
 
-def test_bidi_controls_are_blanked():
-    md = make(cues=[Cue(0, "abc\u202edef\u2066g")])
-    assert "\u202e" not in md and "\u2066" not in md
+def test_bidi_and_control_characters_are_blanked_in_captions():
+    md = make(cues=[Cue(0, "abc\u202edef\u2066g\x7f\x9fh")])
+    assert "\u202e" not in md and "\u2066" not in md and "\x7f" not in md and "\x9f" not in md
+    assert "abc def g  h" in md
+
+
+def test_lone_surrogates_do_not_crash_and_are_replaced():
+    md = make(title="a\ud800b", cues=[Cue(0, "x\udc00y")])
+    md.encode("utf-8")
+    assert md.startswith("# a?b\n")
+    assert "x?y" in md
 
 
 def test_title_is_one_line_escaped_and_bounded():
-    md = make(title="[Click](http://evil.example) <img src=x> `c` *e*\n# Forged\u2028- **@a**")
-    head = md.split("\n\n")[0]
-    assert "\n" not in head and head.startswith("# ")
-    for live in ("](http", "<img", "`c`", "*e*", "**@"):
-        assert not any(head[i - 1] != "\\" for i in [m.start() for m in re.finditer(re.escape(live), head)]), live
-    assert "\\[Click\\]" in head
+    assert_title_head(make(title=TITLE))
     assert make(title="").startswith("# YouTube video\n")
     assert make(title="  \n ").startswith("# YouTube video\n")
     assert len(make(title="x" * 5000).split("\n")[0]) <= 2 + render.MAX_TITLE_CHARS
@@ -149,6 +165,14 @@ def test_cues_are_chunked_by_time():
     assert chunk_cues(cs, 0) == [(c.start, c.text) for c in cs]
 
 
+def test_chunks_are_also_bounded_in_size():
+    # Cues that all start at 0 would otherwise make one giant, all-or-nothing line.
+    cs = [Cue(0, "x" * 100) for _ in range(1000)]
+    chunks = chunk_cues(cs, 15)
+    assert len(chunks) > 1
+    assert all(len(text) <= render.MAX_CHUNK_CHARS + 100 for _, text in chunks)
+
+
 def test_output_is_capped_and_says_so():
     many = [Cue(float(i * 20), "word " * 50) for i in range(2000)]
     out = make(cues=many, max_bytes=20_000)
@@ -156,6 +180,14 @@ def test_output_is_capped_and_says_so():
     assert "_Transcript cut off after [" in out and "to stay within the size limit._" in out
     assert_no_forgery(out)
     assert "cut off" not in make(cues=many[:3], max_bytes=20_000)
+
+
+def test_cap_keeps_the_longest_prefix_that_fits():
+    many = [Cue(float(i * 20), "word " * 50) for i in range(2000)]
+    out = make(cues=many, max_bytes=20_000)
+    kept = out.count("\n[")
+    one_more = make(cues=many[: kept + 1], max_bytes=10**9) + render._cut_off_note(many[kept].start)
+    assert len(one_more.encode()) > 20_000, "one more chunk would not have fit"
 
 
 def test_cap_holds_when_the_fence_grows():
@@ -171,10 +203,36 @@ def test_cap_counts_bytes_not_characters():
     assert len(out.encode()) <= 5_000
 
 
-def test_nothing_fits_still_returns_valid_markdown():
-    out = make(cues=cues("x" * 5000), max_bytes=400)
-    assert len(out.encode()) <= 400 or "cut off" in out
-    outside_fences(out)
+def test_cues_sharing_one_timestamp_still_yield_a_transcript():
+    out = make(cues=[Cue(0, "y" * 100) for _ in range(20_000)], max_bytes=1024 * 1024)
+    assert len(out.encode()) <= 1024 * 1024
+    assert out.count("y" * 100) > 1000, "the cap keeps a large prefix, not an empty fence"
+
+
+@pytest.mark.parametrize("cap, text", [(50, "x"), (400, "x" * 5000)], ids=["cap-below-header", "one-chunk-too-big"])
+def test_nothing_fits_is_an_error_not_an_empty_transcript(cap, text):
+    with pytest.raises(errors.TranscriptError) as e:
+        make(cues=cues(text), max_bytes=cap)
+    assert e.value.message == errors.internal("output_too_large").message
+
+
+def test_the_output_never_exceeds_the_cap_when_it_succeeds():
+    for cap in (200, 300, 500, 1000):
+        for n in (1, 3, 40):
+            try:
+                out = make(cues=[Cue(float(i * 20), "w" * 30) for i in range(n)], max_bytes=cap)
+            except errors.TranscriptError:
+                continue
+            assert len(out.encode()) <= cap
+
+
+def test_a_full_size_transcript_renders_quickly():
+    # ~5 MiB of captions (the parser's cap) rendered to the 1 MiB output cap.
+    big = [Cue(float(i), f"some caption words here {i}") for i in range(160_000)]
+    start = time.perf_counter()
+    out = make(cues=big)
+    assert time.perf_counter() - start < 2.0
+    assert len(out.encode()) <= render.MAX_OUTPUT_BYTES and "cut off" in out
 
 
 def test_one_line_and_escape_inline_are_total():
@@ -184,65 +242,47 @@ def test_one_line_and_escape_inline_are_total():
 
 
 # --- inertness mutation checks -------------------------------------------------
-# The checkers above are only worth having if they fail when the defence is
-# removed. Each test breaks one defence and requires `assert_no_forgery` (or the
-# stray-character check) to notice.
+# The checkers above are only worth having if they fail when a defence is
+# removed. Each test breaks one defence and requires the checker that guards it
+# to raise.
 
-def _broken_fence_fixed_length(text, spaces=0):
-    return "```\n" + text.strip("\n") + "\n```\n"
-
-
-def _broken_fence_no_normalisation(text, spaces=0):
-    real = render._clean_for_fence
-    try:
-        render._clean_for_fence = lambda t: t
-        return _original_fenced_block(text, spaces)
-    finally:
-        render._clean_for_fence = real
+def _payload_md(**over):
+    return make(title="t", cues=[Cue(0, "x\n```\n## after\n- **@x** evil")], **over)
 
 
-_original_fenced_block = render.fenced_block
+def test_unmutated_payload_is_inert():
+    assert_no_forgery(_payload_md())
 
 
-def _broken_fence_only_crlf(text, spaces=0):
-    # normalises \r\n but leaves lone CR, VT, FF, U+2028 ... as they are
-    real = render._clean_for_fence
-    try:
-        render._clean_for_fence = lambda t: t.replace("\r\n", "\n")
-        return _original_fenced_block(text, spaces)
-    finally:
-        render._clean_for_fence = real
-
-
-def _no_fence(text, spaces=0):
-    return text + "\n"
-
-
-@pytest.mark.parametrize("broken", [_broken_fence_fixed_length, _no_fence])
+@pytest.mark.parametrize("broken", [lambda longest: "```", lambda longest: ""], ids=["fixed-length", "no-fence"])
 def test_mutation_a_fixed_or_missing_fence_is_detected(broken):
-    with mock.patch.object(render, "fenced_block", broken):
-        md = make(title="t", cues=[Cue(0, "x\n```\n## after\n- **@x** evil")])
+    with mock.patch.object(render, "_fence_for", broken):
+        md = _payload_md()
     with pytest.raises(AssertionError):
         assert_no_forgery(md)
 
 
-@pytest.mark.parametrize("broken", [_broken_fence_no_normalisation, _broken_fence_only_crlf])
+@pytest.mark.parametrize(
+    "broken",
+    [lambda t: t, lambda t: t.replace("\r\n", "\n")],
+    ids=["no-normalisation", "crlf-only"],
+)
 def test_mutation_unnormalised_line_breaks_are_detected(broken):
-    with mock.patch.object(render, "fenced_block", broken):
-        md = make(title="t", cues=[Cue(0, "x\u2028- **@a**\ry\x0bz")])
-    stray = any(c in md for c in LINE_BREAKS)
-    assert stray, "the mutation must leave a stray line break for the check to see"
+    with mock.patch.object(render, "_clean_for_fence", broken):
+        md = make(title="t", cues=[Cue(0, "x\u2028- **@a**\ry\x0bz\x1f")])
+    with pytest.raises(AssertionError):
+        assert_no_stray_breaks(md)
 
 
 def test_mutation_unescaped_title_is_detected():
     with mock.patch.object(render, "escape_inline", lambda s: s):
-        md = make(title="[Click](http://evil.example)")
-    head = md.split("\n\n")[0]
-    assert "](http" in head and "\\[Click\\]" not in head
+        md = make(title=TITLE)
+    with pytest.raises(AssertionError):
+        assert_title_head(md)
 
 
 def test_mutation_multiline_title_is_detected():
     with mock.patch.object(render, "one_line", lambda s: s):
-        md = make(title="t\n## forged")
+        md = make(title=TITLE)
     with pytest.raises(AssertionError):
-        assert_no_forgery(md)
+        assert_title_head(md)

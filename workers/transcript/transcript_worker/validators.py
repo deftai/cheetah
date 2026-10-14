@@ -128,8 +128,13 @@ def validate_job(fields: Mapping[object, object]) -> Job:
         if not isinstance(ip, str):
             raise reject("resolved_ip is not an IP address")
         try:
-            ipaddress.ip_address(ip)
+            addr = ipaddress.ip_address(ip)
         except ValueError:
             raise reject("resolved_ip is not an IP address") from None
+        # The gateway pins www.youtube.com to this address. Loopback, private,
+        # link-local (cloud metadata), multicast and scoped (`fe80::1%eth0`)
+        # addresses are never a valid pin, whoever wrote the stream entry.
+        if "%" in ip or not addr.is_global or addr.is_multicast:
+            raise reject("resolved_ip is not a public address")
         resolved_ip = ip
     return Job(job_id=job_id, video_id=video_id, url=url, language=language, resolved_ip=resolved_ip)

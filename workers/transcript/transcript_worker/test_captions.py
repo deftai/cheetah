@@ -136,5 +136,17 @@ def test_pathological_files_parse_in_linear_time(filler):
     assert time.perf_counter() - start < 3.0
 
 
+def test_rolling_dedupe_is_linear_in_lines_per_cue():
+    # `line not in previous_lines` over a list is quadratic: two cues of 20k
+    # distinct lines took 8 s, and a 5 MiB file would take about half an hour.
+    n = 20_000
+    cue = lambda t, tag: f"00:00:0{t}.000 --> 00:00:0{t + 1}.000\n" + "\n".join(f"{tag}{i:06d}" for i in range(n))  # noqa: E731
+    vtt = ("WEBVTT\n\n" + cue(1, "a") + "\n\n" + cue(2, "b") + "\n").encode()
+    start = time.perf_counter()
+    cues = parse_vtt(vtt, rolling_dedupe=True)
+    assert time.perf_counter() - start < 1.0
+    assert len(cues) == 2
+
+
 def test_cue_is_a_plain_value():
     assert Cue(1.0, "x") == Cue(1.0, "x")

@@ -4,10 +4,13 @@ sleeps or reads the wall clock in tests."""
 from __future__ import annotations
 
 import math
+import random
 import threading
 import time
 from collections.abc import Callable
 from email.utils import parsedate_to_datetime
+
+MAX_RETRY_AFTER = 300.0
 
 
 class TokenBucket:
@@ -49,8 +52,6 @@ class TokenBucket:
             return wait
 
 
-MAX_RETRY_AFTER = 300.0
-
 
 def parse_retry_after(value: object, now_epoch: float | None = None) -> float | None:
     """Seconds from a Retry-After header (delta-seconds or an HTTP date), capped
@@ -81,7 +82,7 @@ def backoff_delay(
     retry_after: float | None = None,
     base: float = 2.0,
     cap: float = 60.0,
-    jitter: Callable[[], float] = lambda: 0.5,
+    jitter: Callable[[], float] = random.random,
 ) -> float:
     """Seconds to wait before retry number `attempt` (0-based): exponential with
     jitter in [0.5, 1.5) of the step (`jitter()` returns a value in [0, 1)),

@@ -111,6 +111,25 @@ def test_non_string_values_are_rejected_not_coerced():
             validate_job(fields(**{key: b"bytes"}))
 
 
+@pytest.mark.parametrize(
+    "ip",
+    [
+        "127.0.0.1", "10.0.0.1", "192.168.1.1", "172.16.0.1", "169.254.169.254", "0.0.0.0", "100.64.0.1",
+        "224.0.0.1", "::1", "::", "fe80::1", "fe80::1%eth0", "fd00::1", "::ffff:127.0.0.1", "::ffff:10.0.0.1",
+        "142.250.80.46%eth0", " 142.250.80.46", "142.250.80.46\n",
+    ],
+    ids=lambda s: repr(s),
+)
+def test_resolved_ip_must_be_a_public_address(ip):
+    with pytest.raises(JobRejected):
+        validate_job(fields(resolved_ip=ip))
+
+
+@pytest.mark.parametrize("ip", ["142.250.80.46", "8.8.8.8", "2607:f8b0:4004:c07::65", "2001:4860:4860::8888"])
+def test_public_resolved_ips_are_accepted(ip):
+    assert validate_job(fields(resolved_ip=ip)).resolved_ip == ip
+
+
 def test_absent_resolved_ip_and_format_are_fine():
     job = validate_job(fields(resolved_ip=None, format=None))
     assert job.resolved_ip is None

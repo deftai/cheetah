@@ -26,6 +26,7 @@ _INTERNAL_MESSAGES = {
     "caption_too_large": "The caption file was larger than the worker accepts.",
     "caption_unparseable": "The caption file could not be read.",
     "caption_empty": "The caption track contained no text.",
+    "output_too_large": "The transcript was too large to return.",
     "unexpected": "The transcript could not be produced because of an internal error.",
 }
 

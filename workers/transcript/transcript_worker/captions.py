@@ -54,7 +54,7 @@ def parse_vtt(data: bytes, *, rolling_dedupe: bool = False, max_bytes: int = MAX
         raise errors.internal("caption_unparseable")
 
     cues: list[Cue] = []
-    previous: list[str] = []
+    previous: set[str] = set()
     for block in re.split(r"\n[ \t]*\n", text):
         lines = block.split("\n")
         timing_at = next((i for i, ln in enumerate(lines) if "-->" in ln), None)
@@ -67,8 +67,9 @@ def parse_vtt(data: bytes, *, rolling_dedupe: bool = False, max_bytes: int = MAX
         body = [c for c in (_clean_line(ln) for ln in lines[timing_at + 1 :]) if c]
         if not body:
             continue
+        # A set: `in <list>` would make two cues of n lines each cost O(n^2).
         shown = [ln for ln in body if ln not in previous] if rolling_dedupe else body
-        previous = body
+        previous = set(body)
         if shown:
             cues.append(Cue(start=start, text=" ".join(shown)))
     if not cues:
