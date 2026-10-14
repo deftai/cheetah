@@ -3,6 +3,7 @@ package main
 import (
 	"net"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -145,7 +146,7 @@ func TestParseSubmittedURL(t *testing.T) {
 		{"userinfo with fragment", "https://a@github.com#@evil.example/o/r", ""},
 		{"backslash authority", `https://github.com\@evil.example/o/r`, ""},
 		{"backslash path", `https://example.com/a\b`, ""},
-		{"bad port", "https://example.com:99999x/", ""},
+		{"fragment directly after host", "https://example.com#top", ""},
 		{"fragment colon port", "https://github.com#:80@evil.example/", ""},
 	}
 	for _, tt := range tests {
@@ -186,5 +187,15 @@ func TestClassifyAndValidateAgreeOnHost(t *testing.T) {
 		if b, _ := url.ParseRequestURI(raw); b.Hostname() != a.Hostname() {
 			t.Errorf("%q: validator host %q != classifier host %q", raw, b.Hostname(), a.Hostname())
 		}
+	}
+}
+
+func TestParseSubmittedURLErrorOmitsCredentials(t *testing.T) {
+	_, err := parseSubmittedURL("https://user:s3cret@example.com:99999x/")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if strings.Contains(err.Error(), "s3cret") {
+		t.Fatalf("error leaks credentials: %v", err)
 	}
 }

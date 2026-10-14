@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -16,18 +17,18 @@ import (
 // must parse identically under both parsers, and contain no backslashes.
 func parseSubmittedURL(rawURL string) (*url.URL, error) {
 	if strings.ContainsRune(rawURL, '\\') {
-		return nil, fmt.Errorf("url contains backslash")
+		return nil, errors.New("url contains backslash")
 	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return nil, err
+		return nil, redactURLError(err)
 	}
 	r, err := url.ParseRequestURI(rawURL)
 	if err != nil {
-		return nil, err
+		return nil, redactURLError(err)
 	}
 	if u.Scheme != r.Scheme || u.Host != r.Host || u.User.String() != r.User.String() {
-		return nil, fmt.Errorf("ambiguous url authority")
+		return nil, errors.New("ambiguous url authority")
 	}
 	return u, nil
 }
@@ -87,4 +88,14 @@ func isPrivateIP(ip net.IP) bool {
 		ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() ||
 		ip.IsUnspecified()
+}
+
+// redactURLError drops the quoted input that *url.Error embeds, since the
+// submitted URL may carry credentials (userinfo) or tokens that must not be logged.
+func redactURLError(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return fmt.Errorf("%s: %w", ue.Op, ue.Err)
+	}
+	return err
 }
