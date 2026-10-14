@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -257,12 +258,30 @@ func TestExtractTranscriptToolIsOfferedOnlyWhenEnabled(t *testing.T) {
 		t.Fatalf("enabled server should offer 6 tools including extract_transcript: %v", names)
 	}
 
-	// The discovery document agrees with tools/list.
+	// The discovery document lists exactly the tools that tools/list does.
 	for _, enabled := range []bool{false, true} {
+		app := transcriptApp(enabled)
 		req, _ := http.NewRequest(http.MethodGet, "/.well-known/mcp.json", nil)
-		resp, err := transcriptApp(enabled).Test(req)
+		resp, err := app.Test(req)
 		if err != nil || resp.StatusCode != http.StatusOK {
 			t.Fatalf("discovery failed: %v %v", err, resp)
+		}
+		var doc struct {
+			Tools []mcpTool `json:"tools"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
+			t.Fatalf("discovery is not valid JSON: %v", err)
+		}
+		var discovered []string
+		for _, tool := range doc.Tools {
+			discovered = append(discovered, tool.Name)
+		}
+		listed := toolNames(t, app)
+		if strings.Join(discovered, ",") != strings.Join(listed, ",") {
+			t.Fatalf("enabled=%v: discovery lists %v but tools/list returns %v", enabled, discovered, listed)
+		}
+		if contains(discovered, "extract_transcript") != enabled {
+			t.Fatalf("enabled=%v: discovery lists %v", enabled, discovered)
 		}
 	}
 }
