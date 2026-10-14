@@ -24,10 +24,12 @@ _TIMING = re.compile(
 # 5 MiB caption file.
 _TAG = re.compile(r"<[^<>]*>")
 _SPACE = re.compile(r"\s+")
-# No code point needs more than 7 decimal digits. `html.unescape` raises ValueError on a
-# decimal reference of over 4300 digits (Python's int-conversion limit), and a caption's
-# author controls that text, so longer ones are replaced before it runs.
-_LONG_NUMERIC_REF = re.compile(r"&#[0-9]{9,};?")
+# `html.unescape` raises ValueError on a decimal reference of over 4300 digits (Python's
+# int-conversion limit, which counts leading zeros), and a caption's author controls that
+# text, so references it cannot sensibly decode are replaced before it runs: those with
+# 8 or more significant digits (no code point needs more than 7) and those with more than
+# 64 digits in all. Zero-padded references of a valid value, such as `&#000000065;`, stay.
+_LONG_NUMERIC_REF = re.compile(r"&#(?:0*[1-9][0-9]{7,}|[0-9]{65,});?")
 
 
 @dataclass(frozen=True)

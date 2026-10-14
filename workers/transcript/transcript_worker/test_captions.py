@@ -146,6 +146,17 @@ def test_huge_numeric_character_references_do_not_crash():
     assert parse_vtt(b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n&#65;&#x42;&#0000067;\n")[0].text == "ABC"
 
 
+def test_zero_padded_numeric_references_keep_their_value():
+    # &#000000065; is "A": only references whose value cannot be a code point, or whose
+    # digit string is long enough to hit int()'s conversion limit, are replaced.
+    ok = "&#000000065;&#0000000000000000066;&#x0000000043;&#" + "0" * 60 + "68;"
+    assert parse_vtt(f"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n{ok}\n".encode())[0].text == "ABCD"
+    too_long = ("&#" + "0" * 5000 + "65;", "&#" + "0" * 5000 + "65", "&#" + "0" * 70 + "65;")
+    for ref in (*too_long, "&#12345678;", "&#00012345678;"):
+        text = parse_vtt(f"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nx{ref}y\n".encode())[0].text
+        assert text == "x\ufffdy", ref
+
+
 def test_size_is_checked_before_parsing():
     big = b"WEBVTT\n\n" + b"00:00:01.000 --> 00:00:02.000\nx\n\n" * 10
     with pytest.raises(errors.TranscriptError) as e:

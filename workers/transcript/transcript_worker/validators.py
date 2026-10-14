@@ -21,8 +21,6 @@ _VIDEO_ID = re.compile(r"[A-Za-z0-9_-]{11}")
 # The gateway's transcriptLanguagePattern: a 2-3 letter language with optional
 # subtags (en, pt-BR, zh-Hans) and the original-speech form (ko-orig).
 _REQUEST_LANGUAGE = re.compile(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8}){0,3}")
-# Caption language tags read back from YouTube metadata (third-party strings).
-_LANGUAGE_TAG = re.compile(r"[A-Za-z0-9-]{1,16}")
 # YouTube's playlist and channel-live embed pages: 11 id characters, not videos.
 _NOT_VIDEOS = frozenset({"videoseries", "live_stream"})
 # Ranges that `ipaddress.is_global` accepts on some Python versions but that are never a
@@ -82,8 +80,12 @@ def valid_request_language(s: object) -> bool:
 
 
 def valid_language_tag(s: object) -> bool:
-    """A caption language tag from YouTube metadata, safe to echo to callers."""
-    return isinstance(s, str) and _LANGUAGE_TAG.fullmatch(s) is not None
+    """A caption language tag that is safe to echo to callers and to pass to yt-dlp.
+
+    It is the same rule as `valid_request_language`, on purpose: tracks are kept only if a
+    caller could request them, and a tag that passed one check but failed the other would be
+    selected and then missing from `available_languages` or refused by the renderer."""
+    return valid_request_language(s)
 
 
 def clean_languages(tags: Iterable[object], limit: int = MAX_AVAILABLE_LANGUAGES) -> list[str]:

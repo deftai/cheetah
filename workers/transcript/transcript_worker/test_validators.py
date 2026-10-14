@@ -158,6 +158,6 @@ def test_absent_resolved_ip_and_format_are_fine():
 def test_language_tags_from_youtube_are_validated_and_capped():
     tags = ["en", "EN", "pt-BR", "x y", "a" * 17, "", None, "live_chat", "ko-orig", "en\n"]
     assert clean_languages(tags) == ["en", "ko-orig", "pt-BR"]
-    many = [f"a{i:03d}" for i in range(300)]
+    many = [f"en-x{i:03d}" for i in range(300)]
     assert len(clean_languages(many)) == 100
     assert clean_languages(many) == sorted(many)[:100]

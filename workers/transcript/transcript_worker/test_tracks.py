@@ -93,6 +93,19 @@ def test_only_tags_a_caller_could_request_become_tracks_or_a_spoken_language():
         assert listing.spoken_language is None, bad
 
 
+def test_every_selectable_language_can_be_listed_and_rendered():
+    # The longest tag a caller can request (20 characters, three subtags) must work end to end:
+    # become a track, appear in available_languages, and render.
+    from transcript_worker.captions import Cue
+    from transcript_worker.render import render_transcript
+
+    tag = "ca-Latn-ES-valencia"
+    sel = select_track(tracks_from_info(info(manual=[tag])), tag)
+    assert sel.track.language == tag and tag in sel.transcript_meta()["available_languages"]
+    out = render_transcript(title="t", video_id="dQw4w9WgXcQ", kind=sel.track.kind, language=tag, cues=[Cue(0, "x")])
+    assert f"language {tag}" in out
+
+
 def test_declared_language_wins_over_orig_track():
     i = info(manual=["en"], native=["ko-orig"], language="en")
     assert tracks_from_info(i).spoken_language == "en"
