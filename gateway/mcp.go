@@ -84,6 +84,29 @@ var mcpTools = []mcpTool{
 	},
 }
 
+// transcriptTool is only offered when the transcript worker is enabled
+// (Config.TranscriptWorker), so clients are not shown a tool that cannot work.
+var transcriptTool = mcpTool{
+	Name:        "extract_transcript",
+	Description: "Get the transcript (captions) of a YouTube video as text with timestamps. Only accepts YouTube video URLs; use scrape for other pages. Best-effort: YouTube may refuse some requests, and videos without captions return an error.",
+	InputSchema: json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"url": {"type": "string", "description": "A YouTube video URL (watch, youtu.be, shorts, embed or live)"},
+			"language": {"type": "string", "description": "Caption language code, e.g. en, pt-BR, or ko-orig for the original spoken language (default: the video's original language when available)"}
+		},
+		"required": ["url"]
+	}`),
+}
+
+// mcpToolsFor returns the tools to advertise for this server's configuration.
+func mcpToolsFor(transcriptEnabled bool) []mcpTool {
+	if !transcriptEnabled {
+		return mcpTools
+	}
+	return append(append([]mcpTool{}, mcpTools...), transcriptTool)
+}
+
 type jsonrpcRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id"`
@@ -137,7 +160,7 @@ type toolCallParams struct {
 	Arguments json.RawMessage `json:"arguments"`
 }
 
-func handleMCPDiscovery() fiber.Handler {
+func handleMCPDiscovery(transcriptEnabled bool) fiber.Handler {
 	info := struct {
 		Name        string    `json:"name"`
 		Version     string    `json:"version"`
@@ -149,7 +172,7 @@ func handleMCPDiscovery() fiber.Handler {
 		Version:     "1.0.0",
 		Description: "Web scraping, crawling, and AI extraction API",
 		Endpoint:    "/v1/mcp",
-		Tools:       mcpTools,
+		Tools:       mcpToolsFor(transcriptEnabled),
 	}
 
 	return func(c *fiber.Ctx) error {
@@ -157,7 +180,7 @@ func handleMCPDiscovery() fiber.Handler {
 	}
 }
 
-func handleMCP(queue *QueueClient, aiEndpoint string) fiber.Handler {
+func handleMCP(queue *QueueClient, aiEndpoint string, transcriptEnabled bool) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		var req jsonrpcRequest
 		if err := json.Unmarshal(c.Body(), &req); err != nil {
@@ -194,10 +217,10 @@ func handleMCP(queue *QueueClient, aiEndpoint string) fiber.Handler {
 			return c.JSON(jsonrpcResponse{
 				JSONRPC: "2.0",
 				ID:      req.ID,
-				Result:  mcpToolsListResult{Tools: mcpTools},
+				Result:  mcpToolsListResult{Tools: mcpToolsFor(transcriptEnabled)},
 			})
 		case "tools/call":
-			return handleMCPToolCall(c, req, queue, aiEndpoint)
+			return handleMCPToolCall(c, req, queue, aiEndpoint, transcriptEnabled)
 		default:
 			return c.JSON(jsonrpcResponse{
 				JSONRPC: "2.0",
@@ -208,7 +231,7 @@ func handleMCP(queue *QueueClient, aiEndpoint string) fiber.Handler {
 	}
 }
 
-func handleMCPToolCall(c *fiber.Ctx, req jsonrpcRequest, queue *QueueClient, aiEndpoint string) error {
+func handleMCPToolCall(c *fiber.Ctx, req jsonrpcRequest, queue *QueueClient, aiEndpoint string, transcriptEnabled bool) error {
 	var params toolCallParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		return c.JSON(jsonrpcResponse{
@@ -225,6 +248,8 @@ func handleMCPToolCall(c *fiber.Ctx, req jsonrpcRequest, queue *QueueClient, aiE
 		return mcpCrawl(c, req, params, queue)
 	case "get_repository_content", "get_thread":
 		return mcpPlatformTool(c, req, params, queue)
+	case "extract_transcript":
+		return mcpTranscript(c, req, params, queue, transcriptEnabled)
 	case "extract":
 		return mcpExtract(c, req, params, queue, aiEndpoint)
 	default:
@@ -513,6 +538,68 @@ func mcpPlatformTool(c *fiber.Ctx, rpc jsonrpcRequest, params toolCallParams, qu
 
 	LogRouteDecision(jobID, args.URL, decision)
 	return mcpToolSuccess(c, rpc, map[string]interface{}{"success": true, "job_id": jobID, "strategy": decision.Strategy})
+}
+
+func mcpTranscript(c *fiber.Ctx, rpc jsonrpcRequest, params toolCallParams, queue *QueueClient, enabled bool) error {
+	var args struct {
+		URL      string `json:"url"`
+		Language string `json:"language"`
+	}
+	if err := json.Unmarshal(params.Arguments, &args); err != nil || args.URL == "" {
+		return mcpToolError(c, rpc, "url is required")
+	}
+	if !enabled {
+		return mcpToolError(c, rpc, "extract_transcript is not enabled on this server")
+	}
+	if args.Language != "" && !validTranscriptLanguage(args.Language) {
+		return mcpToolError(c, rpc, "language must be a language code such as en, pt-BR or ko-orig")
+	}
+
+	// A pure check, so a wrong URL is refused before any DNS lookup or queue access.
+	videoID, msg := transcriptURLError(args.URL)
+	if msg != "" {
+		return mcpToolError(c, rpc, msg)
+	}
+
+	// Only the validated id is used: the worker is given the canonical URL, never
+	// the submitted one.
+	canonical := canonicalYouTubeURL(videoID)
+	resolvedIP, err := ValidateScrapeURL(canonical)
+	if err != nil {
+		return mcpToolError(c, rpc, err.Error())
+	}
+
+	plan, _ := c.Locals("plan").(Plan)
+	if !IsTierAllowed(TierFast, plan.AllowedTiers) {
+		return mcpToolError(c, rpc, "this URL requires the fast tier, upgrade your plan")
+	}
+
+	scrapeReq := ScrapeRequest{
+		URL:        canonical,
+		Format:     "markdown",
+		ResolvedIP: resolvedIP,
+		Strategy:   StrategyYouTubeTranscript,
+		VideoID:    videoID,
+		Language:   args.Language,
+	}
+	jobID, err := queue.EnqueueScrape(c.Context(), scrapeReq, callerOwner(c), transcriptStream)
+	if err != nil {
+		log.Printf("mcp enqueue transcript error: %v", err)
+		return mcpToolError(c, rpc, "failed to enqueue job")
+	}
+
+	LogRouteDecision(jobID, canonical, RouteDecision{
+		Tier:       TierFast,
+		Reason:     "platform: " + StrategyYouTubeTranscript,
+		Confidence: 0.9,
+		Strategy:   StrategyYouTubeTranscript,
+	})
+	return mcpToolSuccess(c, rpc, map[string]interface{}{
+		"success":  true,
+		"job_id":   jobID,
+		"strategy": StrategyYouTubeTranscript,
+		"video_id": videoID,
+	})
 }
 
 func mcpCrawl(c *fiber.Ctx, rpc jsonrpcRequest, params toolCallParams, queue *QueueClient) error {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +19,9 @@ type Config struct {
 	Port          string
 	AIEndpointURL string
 	ProxySecret   string
+	// TranscriptWorker says a worker is consuming transcript_jobs. Off by
+	// default: the YouTube transcript tool is only offered when it is on.
+	TranscriptWorker bool
 }
 
 // loadProxySecret reads ENGINE_PROXY_SECRET and refuses to start on a weak
@@ -32,6 +36,21 @@ func loadProxySecret() string {
 		log.Fatalf("ENGINE_PROXY_SECRET must be at least %d characters", minProxySecretLen)
 	}
 	return secret
+}
+
+// loadTranscriptWorker reads TRANSCRIPT_WORKER_ENABLED. Anything that is not a
+// clear "true" leaves the feature off, and a malformed value says so in the log.
+func loadTranscriptWorker() bool {
+	v := strings.TrimSpace(os.Getenv("TRANSCRIPT_WORKER_ENABLED"))
+	if v == "" {
+		return false
+	}
+	enabled, err := strconv.ParseBool(v)
+	if err != nil {
+		log.Printf("TRANSCRIPT_WORKER_ENABLED=%q is not a boolean: YouTube transcripts stay disabled", v)
+		return false
+	}
+	return enabled
 }
 
 func LoadConfig() Config {
@@ -62,6 +81,8 @@ func LoadConfig() Config {
 		Port:          port,
 		AIEndpointURL: os.Getenv("AI_ENDPOINT_URL"),
 		ProxySecret:   loadProxySecret(),
+
+		TranscriptWorker: loadTranscriptWorker(),
 	}
 }
 
@@ -89,7 +110,7 @@ func NewApp(cfg Config, queue *QueueClient, opts ...AppOption) *fiber.App {
 	app.Use(RequestLogger())
 
 	app.Get("/health", handleHealthLiveness(queue))
-	app.Get("/.well-known/mcp.json", handleMCPDiscovery())
+	app.Get("/.well-known/mcp.json", handleMCPDiscovery(cfg.TranscriptWorker))
 
 	v1 := app.Group("/v1")
 	if len(cfg.APIKeys) > 0 {
@@ -113,7 +134,7 @@ func NewApp(cfg Config, queue *QueueClient, opts ...AppOption) *fiber.App {
 	v1.Post("/scrape", handleScrape(queue))
 	v1.Post("/crawl", handleCrawl(queue))
 	v1.Post("/extract", handleExtract(queue, cfg.AIEndpointURL))
-	v1.Post("/mcp", handleMCP(queue, cfg.AIEndpointURL))
+	v1.Post("/mcp", handleMCP(queue, cfg.AIEndpointURL, cfg.TranscriptWorker))
 	v1.Get("/crawl/:id", handleCrawlStatus(queue))
 
 	return app

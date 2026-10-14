@@ -14,6 +14,10 @@ type ScrapeRequest struct {
 	Wait          bool             `json:"wait,omitempty"`
 	ResolvedIP    string           `json:"-"`
 	Strategy      string           `json:"-"`
+	// VideoID and Language are set only for transcript jobs and travel as their
+	// own stream fields.
+	VideoID  string `json:"-"`
+	Language string `json:"-"`
 }
 
 type ScrapeResponse struct {
