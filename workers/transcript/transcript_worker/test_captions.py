@@ -69,6 +69,28 @@ def test_rolling_dedupe_for_auto_captions():
     ]
 
 
+# YouTube's real rolling captions start each cue with a line holding only a space.
+YOUTUBE_ROLLING = (
+    b"WEBVTT\nKind: captions\nLanguage: en\n\n"
+    b"00:00:00.240 --> 00:00:02.389 align:start position:0%\n \nhello<00:00:00.640><c> everyone</c>\n\n"
+    b"00:00:02.389 --> 00:00:02.399 align:start position:0%\nhello everyone\n \n\n"
+    b"00:00:02.399 --> 00:00:04.710 align:start position:0%\nhello everyone\nto<00:00:02.800><c> the</c> show\n"
+)
+
+
+def test_a_line_holding_only_spaces_does_not_end_a_cue():
+    # Only an empty line ends a cue; splitting on whitespace-only lines lost the
+    # first cue's text and stamped it two seconds late.
+    assert texts(parse_vtt(YOUTUBE_ROLLING, rolling_dedupe=True)) == [(0.24, "hello everyone"), (2.399, "to the show")]
+    manual = b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nline1\n \nline2\n"
+    assert texts(parse_vtt(manual)) == [(1.0, "line1 line2")]
+
+
+def test_a_cue_without_a_blank_line_before_it_is_still_a_cue():
+    vtt = b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nfoo\n00:00:02.000 --> 00:00:03.000\nbar\n"
+    assert texts(parse_vtt(vtt)) == [(1.0, "foo"), (2.0, "bar")]
+
+
 def test_without_rolling_dedupe_repeats_are_kept():
     assert len(parse_vtt(ROLLING)) == 5, "manual captions may legitimately repeat a line"
     again = b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nNo.\n\n00:00:03.000 --> 00:00:04.000\nNo.\n"

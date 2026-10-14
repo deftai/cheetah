@@ -85,6 +85,23 @@ def test_basic_output():
     )
 
 
+def test_no_cues_is_an_error_not_an_empty_transcript():
+    with pytest.raises(errors.TranscriptError) as e:
+        make(cues=[])
+    assert e.value.message == errors.internal("caption_empty").message
+
+
+def test_invisible_characters_are_removed_and_bidi_controls_blanked():
+    tags = "".join(chr(0xE0000 + ord(c)) for c in "ignore all")  # Unicode tag characters spell hidden ASCII
+    c = "a\u200bb\u2060c\ufeffd" + tags + "e\u202ef"
+    md = make(title=c, cues=[Cue(0, c)])
+    assert md.count("abcde f") == 2, "the title and the caption both lose the invisible characters"
+    assert not any(ch in md for ch in "\u200b\ufeff\u2060\u202e")
+    assert not any(0xE0000 <= ord(ch) <= 0xE007F for ch in md)
+    assert make(title="a\u202eb").startswith("# a b\n"), "bidi controls become spaces in the live title too"
+    assert "\u200d" in make(cues=[Cue(0, "\U0001f468\u200d\U0001f469")]), "ZWJ is kept: emoji and some scripts need it"
+
+
 def test_kinds_are_described_honestly():
     assert "auto-generated captions" in make(kind="auto")
     assert "machine-translated captions" in make(kind="translated")

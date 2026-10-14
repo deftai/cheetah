@@ -16,7 +16,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from . import errors
-from .validators import clean_languages, valid_language_tag
+from .validators import clean_languages, valid_language_tag, valid_request_language
 
 MANUAL = "manual"
 AUTO = "auto"  # YouTube's speech recognition in the video's original language
@@ -99,7 +99,7 @@ def tracks_from_info(info: Mapping[str, object]) -> TrackListing:
     spoken_language = spoken if isinstance(spoken, str) and valid_language_tag(spoken) else None
     if spoken_language is None:
         for t in sorted(tracks, key=lambda t: t.language.casefold()):
-            if t.kind == AUTO and _is_orig(t.language):
+            if t.kind == AUTO and _is_orig(t.language) and valid_request_language(t.language[: -len("-orig")]):
                 spoken_language = t.language[: -len("-orig")]
                 break
     return TrackListing(tracks=tuple(tracks), spoken_language=spoken_language)

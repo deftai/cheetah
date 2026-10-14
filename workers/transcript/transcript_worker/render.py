@@ -12,7 +12,6 @@ inline-escaped, or built from validated values.
 from __future__ import annotations
 
 import re
-import unicodedata
 from collections.abc import Sequence
 
 from . import errors
@@ -29,6 +28,11 @@ MAX_CHUNK_CHARS = 2000
 _LINE_BREAKS = "\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
 # Bidirectional controls can make text display in a different order than it reads.
 _BIDI = "\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
+# Zero-width characters and Unicode tag characters (U+E0000-E007F, which spell ASCII
+# invisibly) are deleted: a person reviewing the text sees nothing, but a consumer that
+# reads it, such as an LLM, would read hidden text. ZWJ and ZWNJ (U+200D, U+200C) stay:
+# emoji sequences and several scripts need them.
+_INVISIBLE = (0x200B, 0x2060, 0xFEFF, *range(0xE0000, 0xE0080))
 _KIND_LABEL = {
     "manual": "captions written by the video's creator",
     "auto": "auto-generated captions",
@@ -37,19 +41,25 @@ _KIND_LABEL = {
 _TICKS = re.compile("`+")
 
 
-def _fence_translation() -> dict[int, str]:
-    """Per-character rules for text inside the fence: control characters (C0 and
-    C1) and bidi controls become spaces, every line-break character becomes
-    `\\n`, and `\\t` and `\\n` stay. A `str.translate` table runs in C; a Python
-    loop over each character was the cost of rendering a 5 MiB transcript."""
-    table = {o: " " for o in (*range(0x20), *range(0x7F, 0xA0))}
+def _translation(*, line_breaks_to: str | None) -> dict[int, str | None]:
+    """Per-character rules: control characters (C0 and C1) and bidi controls become
+    spaces, invisible characters are deleted, and every line-break character becomes
+    `line_breaks_to`. Inside the fence that is `\\n` (and `\\t` and `\\n` stay); on the
+    one-line title it is a space. A `str.translate` table runs in C; a Python loop over
+    each character was the cost of rendering a 5 MiB transcript."""
+    table: dict[int, str | None] = {o: " " for o in (*range(0x20), *range(0x7F, 0xA0))}
     table.update({ord(c): " " for c in _BIDI})
-    table.update({ord(c): "\n" for c in _LINE_BREAKS})
-    del table[ord("\t")], table[ord("\n")]
+    table.update({o: None for o in _INVISIBLE})
+    table.update({ord(c): line_breaks_to for c in _LINE_BREAKS})
+    if line_breaks_to == "\n":
+        del table[ord("\t")], table[ord("\n")]
+    else:
+        table.update({0x2028: " ", 0x2029: " "})
     return table
 
 
-_FENCE_TABLE = _fence_translation()
+_FENCE_TABLE = _translation(line_breaks_to="\n")
+_TITLE_TABLE = _translation(line_breaks_to=" ")
 
 
 def _utf8_safe(s: str) -> str:
@@ -59,8 +69,9 @@ def _utf8_safe(s: str) -> str:
 
 
 def one_line(s: str) -> str:
-    """Control characters (newlines included) and U+2028/2029 become spaces."""
-    return "".join(" " if (unicodedata.category(c) == "Cc" or c in "\u2028\u2029") else c for c in s)
+    """Control characters (newlines included), U+2028/2029 and bidi controls become
+    spaces; invisible characters are deleted."""
+    return s.translate(_TITLE_TABLE)
 
 
 def escape_inline(s: str) -> str:
@@ -154,6 +165,8 @@ def render_transcript(
         f"Video: <{canonical_url(video_id)}>\n\n"
     )
     chunks = chunk_cues(cues, chunk_seconds)
+    if not chunks:
+        raise errors.internal("caption_empty")
     lines = [_clean_for_fence(f"{format_timestamp(t)} {text}").strip("\n") for t, text in chunks]
     total = len(lines)
 
@@ -170,9 +183,10 @@ def render_transcript(
     header_bytes = len(header.encode("utf-8"))
 
     def size(n: int) -> int:
-        """Exact byte size of the output that keeps the first `n` lines."""
-        fence_len = len(_fence_for(longest[n - 1] if n else 0))
-        out = header_bytes + 2 * (fence_len + 1) + (body_bytes[n - 1] + 1 if n else 0)
+        """Exact byte size of the output that keeps the first `n` (at least one) lines:
+        the header, the opening and closing fence (each with its newline), the body and
+        its trailing newline, and the cut-off note unless every line is kept."""
+        out = header_bytes + 2 * (len(_fence_for(longest[n - 1])) + 1) + body_bytes[n - 1] + 1
         if n < total:
             out += len(_cut_off_note(chunks[n - 1][0]).encode("utf-8"))
         return out
@@ -193,8 +207,8 @@ def render_transcript(
         if keep == 0:
             raise errors.internal("output_too_large")
 
-    fence = _fence_for(longest[keep - 1] if keep else 0)
-    out = header + fence + "\n" + "\n".join(lines[:keep]) + ("\n" if keep else "") + fence + "\n"
+    fence = _fence_for(longest[keep - 1])
+    out = header + fence + "\n" + "\n".join(lines[:keep]) + "\n" + fence + "\n"
     if keep < total:
         out += _cut_off_note(chunks[keep - 1][0])
     return out

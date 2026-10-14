@@ -60,23 +60,25 @@ def parse_vtt(data: bytes, *, rolling_dedupe: bool = False, max_bytes: int = MAX
 
     cues: list[Cue] = []
     previous: set[str] = set()
-    for block in re.split(r"\n[ \t]*\n", text):
+    # Only an empty line ends a cue: YouTube starts rolling cues with a line holding a
+    # single space, which must not split them.
+    for block in re.split(r"\n{2,}", text):
         lines = block.split("\n")
-        timing_at = next((i for i, ln in enumerate(lines) if "-->" in ln), None)
-        if timing_at is None:
-            continue  # header, NOTE, STYLE or REGION block
-        m = _TIMING.match(lines[timing_at].strip())
-        if m is None:
-            continue
-        start = int(m["h"] or 0) * 3600 + int(m["m"]) * 60 + int(m["s"]) + int(m["ms"]) / 1000
-        body = [c for c in (_clean_line(ln) for ln in lines[timing_at + 1 :]) if c]
-        if not body:
-            continue
-        # A set: `in <list>` would make two cues of n lines each cost O(n^2).
-        shown = [ln for ln in body if ln not in previous] if rolling_dedupe else body
-        previous = set(body)
-        if shown:
-            cues.append(Cue(start=start, text=" ".join(shown)))
+        # Every timing line starts a cue, so a missing blank line between two cues
+        # does not turn the second one's timing line into text. A header, NOTE, STYLE
+        # or REGION block has none and is skipped.
+        timings = [(i, m) for i, ln in enumerate(lines) if "-->" in ln and (m := _TIMING.match(ln.strip()))]
+        for n, (timing_at, m) in enumerate(timings):
+            start = int(m["h"] or 0) * 3600 + int(m["m"]) * 60 + int(m["s"]) + int(m["ms"]) / 1000
+            end = timings[n + 1][0] if n + 1 < len(timings) else len(lines)
+            body = [c for c in (_clean_line(ln) for ln in lines[timing_at + 1 : end]) if c]
+            if not body:
+                continue
+            # A set: `in <list>` would make two cues of n lines each cost O(n^2).
+            shown = [ln for ln in body if ln not in previous] if rolling_dedupe else body
+            previous = set(body)
+            if shown:
+                cues.append(Cue(start=start, text=" ".join(shown)))
     if not cues:
         raise errors.internal("caption_empty")
     return cues

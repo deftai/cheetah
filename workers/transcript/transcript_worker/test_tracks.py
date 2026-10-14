@@ -74,6 +74,15 @@ def test_a_regional_spoken_language_falls_back_to_a_translated_track_by_primary_
     assert pick(info(translated=["en", "fr"], language="en-US")).language == "en"
 
 
+def test_a_bare_orig_key_does_not_become_the_spoken_language():
+    # "-orig" with no language in front of it is not an original-speech track.
+    listing = tracks_from_info({"automatic_captions": {"-orig": [{"url": "u"}], "en": [{"url": "u"}]}})
+    assert listing.spoken_language is None
+    with pytest.raises(errors.TranscriptError) as e:
+        select_track(listing, None)
+    assert "could not be determined" in e.value.message or e.value.code == "no_track_in_language"
+
+
 def test_declared_language_wins_over_orig_track():
     i = info(manual=["en"], native=["ko-orig"], language="en")
     assert tracks_from_info(i).spoken_language == "en"
