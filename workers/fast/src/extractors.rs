@@ -6,6 +6,8 @@
 //! The chain is straight-line, with at most one extractor attempt and one
 //! generic fetch, so it cannot loop.
 
+pub mod github;
+
 use crate::{fetch_page, FetchConfig, PageResult, Result};
 use futures_util::future::BoxFuture;
 use reqwest::Client;
@@ -25,8 +27,20 @@ pub type ExtractorFn = for<'a> fn(
 
 /// Extractor registry. Slices that add a platform register it here; an
 /// unregistered strategy is ignored and the page is fetched generically.
-pub fn lookup(_strategy: &str) -> Option<ExtractorFn> {
-    None
+pub fn lookup(strategy: &str) -> Option<ExtractorFn> {
+    match strategy {
+        "github_repo" => Some(github::extract),
+        _ => None,
+    }
+}
+
+/// Extractors produce Markdown or plain text, not HTML, so a caller that asked
+/// for `format: "html"` is served by the generic fetch instead.
+pub fn strategy_for_format<'a>(strategy: Option<&'a str>, format: Option<&str>) -> Option<&'a str> {
+    match format {
+        Some(f) if f.eq_ignore_ascii_case("html") => None,
+        _ => strategy,
+    }
 }
 
 #[derive(Debug)]
@@ -144,6 +158,23 @@ mod tests {
         )
         .await;
         (out, calls)
+    }
+
+    #[test]
+    fn html_requests_skip_platform_strategies() {
+        assert_eq!(strategy_for_format(Some("github_repo"), Some("html")), None);
+        assert_eq!(strategy_for_format(Some("github_repo"), Some("HTML")), None);
+        assert_eq!(strategy_for_format(Some("github_repo"), Some("markdown")), Some("github_repo"));
+        assert_eq!(strategy_for_format(Some("github_repo"), Some("text")), Some("github_repo"));
+        assert_eq!(strategy_for_format(Some("github_repo"), None), Some("github_repo"));
+        assert_eq!(strategy_for_format(None, Some("html")), None);
+    }
+
+    #[test]
+    fn registry_resolves_known_strategies_only() {
+        assert!(lookup("github_repo").is_some());
+        assert!(lookup("no_such_strategy").is_none());
+        assert!(lookup("").is_none());
     }
 
     #[tokio::test]

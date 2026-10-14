@@ -18,6 +18,8 @@ pub enum Error {
     BodyTooLarge { max_bytes: usize },
     #[error("URL resolves to a private/reserved IP address")]
     SsrfBlocked,
+    #[error("extractor failed: {0}")]
+    Extractor(String),
 }
 
 fn is_private_ip(ip: IpAddr) -> bool {
@@ -91,11 +93,44 @@ pub struct Metadata {
     pub og_url: Option<String>,
 }
 
+/// A credential whose `Debug` output is redacted so it cannot leak through
+/// `{:?}` logging of the config that holds it.
+#[derive(Clone)]
+pub struct Secret(String);
+
+impl Secret {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::str::FromStr for Secret {
+    type Err = std::convert::Infallible;
+
+    /// Trims surrounding whitespace: a trailing newline (`$(cat tokenfile)`)
+    /// would make the token an invalid header value.
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(Self(s.trim().to_string()))
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(***)")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FetchConfig {
     pub timeout: Duration,
     pub user_agent: String,
     pub max_body_size: usize,
+    /// Optional GitHub API token for the `github_repo` extractor.
+    pub github_token: Option<Secret>,
 }
 
 impl Default for FetchConfig {
@@ -104,8 +139,38 @@ impl Default for FetchConfig {
             timeout: Duration::from_secs(10),
             user_agent: "Mozilla/5.0 (compatible; Cheetah/1.0; +https://cheetah.dev/bot)".into(),
             max_body_size: 10 * 1024 * 1024,
+            github_token: None,
         }
     }
+}
+
+/// Reads a response body, refusing anything over `max_bytes`: a declared
+/// Content-Length is checked up front, and the stream is counted as it arrives.
+pub(crate) async fn read_body_capped(resp: reqwest::Response, max_bytes: usize) -> Result<Vec<u8>> {
+    let too_large = || Error::BodyTooLarge { max_bytes };
+
+    // Check Content-Length before downloading the body.
+    let content_length = resp
+        .headers()
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok());
+    if content_length.is_some_and(|len| len > max_bytes) {
+        return Err(too_large());
+    }
+
+    // Stream the body with a running byte counter instead of buffering the
+    // entire response before checking the size.
+    let mut body = Vec::with_capacity(content_length.unwrap_or(0).min(max_bytes));
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if body.len() + chunk.len() > max_bytes {
+            return Err(too_large());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 pub async fn fetch_page(
@@ -143,38 +208,7 @@ pub async fn fetch_page(
 
     let status_code = resp.status().as_u16();
 
-    // P0 fix: Check Content-Length header before downloading the body.
-    let content_length = resp
-        .headers()
-        .get(reqwest::header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<usize>().ok());
-
-    if let Some(len) = content_length {
-        if len > config.max_body_size {
-            return Err(Error::BodyTooLarge {
-                max_bytes: config.max_body_size,
-            });
-        }
-    }
-
-    // P0 fix: Stream the body with a running byte counter instead of
-    // buffering the entire response before checking the size.
-    let capacity = content_length.unwrap_or(0).min(config.max_body_size);
-    let mut body = Vec::with_capacity(capacity);
-    let mut stream = resp.bytes_stream();
-    let mut total: usize = 0;
-
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        total += chunk.len();
-        if total > config.max_body_size {
-            return Err(Error::BodyTooLarge {
-                max_bytes: config.max_body_size,
-            });
-        }
-        body.extend_from_slice(&chunk);
-    }
+    let body = read_body_capped(resp, config.max_body_size).await?;
 
     let raw_html = String::from_utf8_lossy(&body).into_owned();
 

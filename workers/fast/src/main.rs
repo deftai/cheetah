@@ -1,5 +1,5 @@
 use cheetah_fast::extractors::{self, generic_fetch};
-use cheetah_fast::FetchConfig;
+use cheetah_fast::{FetchConfig, Secret};
 use clap::Parser;
 use reqwest::Client;
 use serde::Serialize;
@@ -59,6 +59,13 @@ struct Args {
 
     #[arg(long, default_value = "job_results")]
     results_prefix: String,
+
+    /// Optional GitHub API token that raises the GitHub extractor's rate limit.
+    /// Prefer the GITHUB_TOKEN environment variable: a flag value is visible in
+    /// `ps`. Use a fine-grained read-only token; the extractor refuses
+    /// non-public repositories either way.
+    #[arg(long, env = "GITHUB_TOKEN", hide_env_values = true)]
+    github_token: Option<Secret>,
 }
 
 #[tokio::main]
@@ -97,7 +104,10 @@ async fn main() -> anyhow::Result<()> {
         .pool_max_idle_per_host(20)
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
-    let config = Arc::new(FetchConfig::default());
+    let config = Arc::new(FetchConfig {
+        github_token: args.github_token.filter(|t| !t.expose().is_empty()),
+        ..FetchConfig::default()
+    });
     let semaphore = Arc::new(Semaphore::new(args.concurrency));
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -193,6 +203,15 @@ async fn main() -> anyhow::Result<()> {
                     }
                     _ => None,
                 });
+
+                let format = entry.map.get("format").and_then(|v| match v {
+                    redis::Value::BulkString(bytes) => Some(String::from_utf8_lossy(bytes).to_string()),
+                    _ => None,
+                });
+                let requested_strategy = requested_strategy
+                    .as_deref()
+                    .and_then(|s| extractors::strategy_for_format(Some(s), format.as_deref()))
+                    .map(str::to_string);
 
                 let permit = semaphore.clone().acquire_owned().await.unwrap();
                 let client = http_client.clone();
