@@ -76,11 +76,21 @@ def test_a_regional_spoken_language_falls_back_to_a_translated_track_by_primary_
 
 def test_a_bare_orig_key_does_not_become_the_spoken_language():
     # "-orig" with no language in front of it is not an original-speech track.
-    listing = tracks_from_info({"automatic_captions": {"-orig": [{"url": "u"}], "en": [{"url": "u"}]}})
+    auto = {"-orig": [{"url": "u"}], "en": [{"url": "u"}], "fr": [{"url": "u"}]}
+    listing = tracks_from_info({"automatic_captions": auto})
     assert listing.spoken_language is None
     with pytest.raises(errors.TranscriptError) as e:
         select_track(listing, None)
-    assert "could not be determined" in e.value.message or e.value.code == "no_track_in_language"
+    assert e.value.code == "no_track_in_language" and "could not be determined" in e.value.message
+
+
+def test_only_tags_a_caller_could_request_become_tracks_or_a_spoken_language():
+    # These tags reach a yt-dlp --sub-langs argument later: "all" means every track, and a
+    # leading "-" is an exclusion. Both fit the permissive tag check but not the request one.
+    for bad in ("all", "ALL", "-en", "--proxy", "en-", "x"):
+        listing = tracks_from_info({"subtitles": {bad: [{"url": "u"}], "en": [{"url": "u"}]}, "language": bad})
+        assert [t.language for t in listing.tracks] == ["en"], bad
+        assert listing.spoken_language is None, bad
 
 
 def test_declared_language_wins_over_orig_track():
@@ -143,10 +153,10 @@ def test_invalid_declared_language_is_ignored():
 
 
 def test_transcript_meta_has_only_validated_strings_and_is_capped():
-    langs = [f"a{i:03d}" for i in range(150)]
-    sel = select_track(tracks_from_info(info(manual=langs)), "a001")
+    langs = [f"en-x{i:03d}" for i in range(150)]
+    sel = select_track(tracks_from_info(info(manual=langs)), "en-x001")
     meta = sel.transcript_meta()
-    assert meta["kind"] == "manual" and meta["language"] == "a001"
+    assert meta["kind"] == "manual" and meta["language"] == "en-x001"
     assert len(meta["available_languages"]) == 100
     assert isinstance(sel, Selection)
 

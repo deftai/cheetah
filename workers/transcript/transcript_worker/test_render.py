@@ -102,6 +102,19 @@ def test_invisible_characters_are_removed_and_bidi_controls_blanked():
     assert "\u200d" in make(cues=[Cue(0, "\U0001f468\u200d\U0001f469")]), "ZWJ is kept: emoji and some scripts need it"
 
 
+def test_other_invisible_and_filler_characters_are_deleted_too():
+    # The same hidden-text channel as the tag block: variation selectors (a supplement that
+    # spells bytes), invisible math operators, soft hyphen and filler characters.
+    hidden = (
+        "".join(chr(0xE0100 + b) for b in b"ignore") + "\ufe00\ufe0e\u2061\u2062\u2063\u2064\u00ad\u034f\u180e"
+        "\u115f\u1160\u3164\uffa0\u17b4\u17b5\ufff9\ufffa\ufffb" + "".join(chr(0xE0080 + b) for b in range(8))
+    )
+    md = make(title="a" + hidden + "b", cues=[Cue(0, "x" + hidden + "y")])
+    assert md.count("ab") == 1 and md.count("xy") == 1
+    assert all(ord(ch) < 0x300 or ch.isalpha() for ch in md), "nothing invisible is left"
+    assert "\ufe0f" in make(cues=[Cue(0, "\u2764\ufe0f")]), "U+FE0F (emoji presentation) is kept"
+
+
 def test_kinds_are_described_honestly():
     assert "auto-generated captions" in make(kind="auto")
     assert "machine-translated captions" in make(kind="translated")

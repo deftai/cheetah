@@ -16,7 +16,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from . import errors
-from .validators import clean_languages, valid_language_tag, valid_request_language
+from .validators import clean_languages, valid_request_language
 
 MANUAL = "manual"
 AUTO = "auto"  # YouTube's speech recognition in the video's original language
@@ -83,8 +83,9 @@ def _collect(group: object, source: str) -> list[Track]:
     if not isinstance(group, Mapping):
         return out
     for lang, formats in group.items():
-        # `live_chat` and any odd key fail validation and are dropped.
-        if not valid_language_tag(lang) or not isinstance(formats, list) or not formats:
+        # Only tags a caller could request: "all" and a leading "-" mean something to yt-dlp's
+        # --sub-langs, and `live_chat` and any odd key are dropped.
+        if not valid_request_language(lang) or not isinstance(formats, list) or not formats:
             continue
         kind = MANUAL if source == MANUAL else (TRANSLATED if _is_translated(formats) else AUTO)
         out.append(Track(language=lang, kind=kind))
@@ -96,7 +97,7 @@ def tracks_from_info(info: Mapping[str, object]) -> TrackListing:
     dropped, never raised: the dict is third-party data."""
     tracks = _collect(info.get("subtitles"), MANUAL) + _collect(info.get("automatic_captions"), AUTO)
     spoken = info.get("language")
-    spoken_language = spoken if isinstance(spoken, str) and valid_language_tag(spoken) else None
+    spoken_language = spoken if isinstance(spoken, str) and valid_request_language(spoken) else None
     if spoken_language is None:
         for t in sorted(tracks, key=lambda t: t.language.casefold()):
             if t.kind == AUTO and _is_orig(t.language) and valid_request_language(t.language[: -len("-orig")]):

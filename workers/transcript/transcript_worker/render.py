@@ -28,11 +28,16 @@ MAX_CHUNK_CHARS = 2000
 _LINE_BREAKS = "\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
 # Bidirectional controls can make text display in a different order than it reads.
 _BIDI = "\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
-# Zero-width characters and Unicode tag characters (U+E0000-E007F, which spell ASCII
-# invisibly) are deleted: a person reviewing the text sees nothing, but a consumer that
-# reads it, such as an LLM, would read hidden text. ZWJ and ZWNJ (U+200D, U+200C) stay:
-# emoji sequences and several scripts need them.
-_INVISIBLE = (0x200B, 0x2060, 0xFEFF, *range(0xE0000, 0xE0080))
+# Characters that render as nothing, or as a blank, but that a consumer reading the text,
+# such as an LLM, can read: zero-width and filler characters, the soft hyphen, invisible
+# math operators, variation selectors (including the supplement, which can spell bytes) and
+# the Unicode tag block (U+E0000-E0FFF, which spells ASCII). They are deleted. ZWJ and ZWNJ
+# (U+200D, U+200C) and U+FE0F (emoji presentation) stay: emoji sequences and several
+# scripts need them.
+_INVISIBLE = (
+    0xAD, 0x34F, 0x115F, 0x1160, 0x17B4, 0x17B5, *range(0x180B, 0x180F), 0x200B, *range(0x2060, 0x2065),
+    0x3164, *range(0xFE00, 0xFE0F), 0xFEFF, 0xFFA0, *range(0xFFF9, 0xFFFC), *range(0xE0000, 0xE1000),
+)
 _KIND_LABEL = {
     "manual": "captions written by the video's creator",
     "auto": "auto-generated captions",
@@ -41,25 +46,23 @@ _KIND_LABEL = {
 _TICKS = re.compile("`+")
 
 
-def _translation(*, line_breaks_to: str | None) -> dict[int, str | None]:
+def _translation(*, keep_newlines: bool) -> dict[int, str | None]:
     """Per-character rules: control characters (C0 and C1) and bidi controls become
     spaces, invisible characters are deleted, and every line-break character becomes
-    `line_breaks_to`. Inside the fence that is `\\n` (and `\\t` and `\\n` stay); on the
-    one-line title it is a space. A `str.translate` table runs in C; a Python loop over
+    a newline (inside the fence, where `\\t` and `\\n` also pass through unchanged) or a
+    space (on the one-line title). A `str.translate` table runs in C; a Python loop over
     each character was the cost of rendering a 5 MiB transcript."""
     table: dict[int, str | None] = {o: " " for o in (*range(0x20), *range(0x7F, 0xA0))}
     table.update({ord(c): " " for c in _BIDI})
     table.update({o: None for o in _INVISIBLE})
-    table.update({ord(c): line_breaks_to for c in _LINE_BREAKS})
-    if line_breaks_to == "\n":
+    table.update({ord(c): "\n" if keep_newlines else " " for c in _LINE_BREAKS})
+    if keep_newlines:
         del table[ord("\t")], table[ord("\n")]
-    else:
-        table.update({0x2028: " ", 0x2029: " "})
     return table
 
 
-_FENCE_TABLE = _translation(line_breaks_to="\n")
-_TITLE_TABLE = _translation(line_breaks_to=" ")
+_FENCE_TABLE = _translation(keep_newlines=True)
+_TITLE_TABLE = _translation(keep_newlines=False)
 
 
 def _utf8_safe(s: str) -> str:
