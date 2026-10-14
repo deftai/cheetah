@@ -24,6 +24,10 @@ _TIMING = re.compile(
 # 5 MiB caption file.
 _TAG = re.compile(r"<[^<>]*>")
 _SPACE = re.compile(r"\s+")
+# No code point needs more than 7 decimal digits. `html.unescape` raises ValueError on a
+# decimal reference of over 4300 digits (Python's int-conversion limit), and a caption's
+# author controls that text, so longer ones are replaced before it runs.
+_LONG_NUMERIC_REF = re.compile(r"&#[0-9]{9,};?")
 
 
 @dataclass(frozen=True)
@@ -33,7 +37,8 @@ class Cue:
 
 
 def _clean_line(line: str) -> str:
-    return _SPACE.sub(" ", html.unescape(_TAG.sub("", line))).strip()
+    untagged = _LONG_NUMERIC_REF.sub(chr(0xFFFD), _TAG.sub("", line))
+    return _SPACE.sub(" ", html.unescape(untagged)).strip()
 
 
 def parse_vtt(data: bytes, *, rolling_dedupe: bool = False, max_bytes: int = MAX_CAPTION_BYTES) -> list[Cue]:

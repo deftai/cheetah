@@ -1,5 +1,4 @@
 import re
-import time
 from unittest import mock
 
 import pytest
@@ -226,12 +225,40 @@ def test_the_output_never_exceeds_the_cap_when_it_succeeds():
             assert len(out.encode()) <= cap
 
 
-def test_a_full_size_transcript_renders_quickly():
+@pytest.mark.parametrize("ticks", [0, 5, 40])
+def test_the_size_table_is_exact_at_every_boundary(ticks):
+    # A cap equal to the exact byte length of a k-line output keeps exactly k lines;
+    # one byte less keeps fewer. (size() can only be wrong by a byte or two, which
+    # coarse cap tests cannot see.)
+    cs = [
+        Cue(float(i * 20), "`" * (i % ticks + 1 if ticks else 0) + f" caption \u65e5\u672c {i}") for i in range(60)
+    ]
+    full = make(cues=cs, max_bytes=10**9)
+    for k in range(1, len(cs)):
+        ref = make(cues=cs[:k], max_bytes=10**9) + render._cut_off_note(cs[k - 1].start)
+        exact = len(ref.encode())
+        # Keeping everything drops the cut-off note, so near the end it can be smaller.
+        assert make(cues=cs, max_bytes=exact) == (full if len(full.encode()) <= exact else ref), k
+        if k == 1:
+            with pytest.raises(errors.TranscriptError):
+                make(cues=cs, max_bytes=exact - 1)
+        else:
+            shorter = make(cues=cs, max_bytes=exact - 1)
+            assert len(shorter.encode()) <= exact - 1
+            assert shorter == full or shorter.count("\n[") < k
+    assert make(cues=cs, max_bytes=len(full.encode())) == full
+    assert "cut off" in make(cues=cs, max_bytes=len(full.encode()) - 1)
+
+
+def test_a_full_size_transcript_is_cleaned_once_per_line():
     # ~5 MiB of captions (the parser's cap) rendered to the 1 MiB output cap.
+    # Asserts the work done, not the seconds: each line must be cleaned once. Cleaning
+    # per size probe (the old design) would call it chunks x log2(chunks) times.
     big = [Cue(float(i), f"some caption words here {i}") for i in range(160_000)]
-    start = time.perf_counter()
-    out = make(cues=big)
-    assert time.perf_counter() - start < 2.0
+    real = render._clean_for_fence
+    with mock.patch.object(render, "_clean_for_fence", side_effect=real) as spy:
+        out = make(cues=big)
+    assert spy.call_count == len(chunk_cues(big))
     assert len(out.encode()) <= render.MAX_OUTPUT_BYTES and "cut off" in out
 
 

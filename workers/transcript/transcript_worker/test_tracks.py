@@ -59,6 +59,16 @@ def test_no_language_means_the_original_spoken_language():
     assert tracks_from_info(i).spoken_language == "ko"
 
 
+def test_a_regional_spoken_language_still_finds_the_original_speech_track():
+    # info["language"] may be "en-US" while the track is the bare "en-orig".
+    i = info(native=["en-orig"], translated=["fr"], language="en-US")
+    assert pick(i).language == "en-orig"
+    assert pick(info(manual=["en"], language="en-GB")).language == "en"
+    # An explicit request is not widened: asking for en-US does not match en-orig.
+    with pytest.raises(errors.TranscriptError):
+        pick(info(native=["en-orig"]), "en-US")
+
+
 def test_declared_language_wins_over_orig_track():
     i = info(manual=["en"], native=["ko-orig"], language="en")
     assert tracks_from_info(i).spoken_language == "en"

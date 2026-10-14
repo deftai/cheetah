@@ -25,6 +25,21 @@ _REQUEST_LANGUAGE = re.compile(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8}){0,3}")
 _LANGUAGE_TAG = re.compile(r"[A-Za-z0-9-]{1,16}")
 # YouTube's playlist and channel-live embed pages: 11 id characters, not videos.
 _NOT_VIDEOS = frozenset({"videoseries", "live_stream"})
+# Ranges that `ipaddress.is_global` accepts on some Python versions but that are never a
+# pin target. IPv6 must also sit inside 2000::/3 (global unicast), which already excludes
+# ::/96 (IPv4-compatible), ::ffff:0:0/96 (mapped), 64:ff9b::/96 (NAT64), fec0::/10 and 5f00::/16.
+_GLOBAL_UNICAST_V6 = ipaddress.ip_network("2000::/3")
+_NOT_A_PIN = tuple(
+    ipaddress.ip_network(n)
+    for n in (
+        "192.0.0.0/24",  # IETF protocol assignments (192.0.0.9 and .10 are 'global' by IANA)
+        "192.31.196.0/24", "192.52.193.0/24", "192.175.48.0/24",  # AS112 and AMT anycast
+        "192.88.99.0/24",  # 6to4 relay anycast
+        "2001::/23",  # IETF protocol assignments, Teredo, benchmarking, ORCHID
+        "2001:db8::/32",  # documentation
+        "2002::/16",  # 6to4: embeds an IPv4 address
+    )
+)
 
 
 class JobRejected(Exception):
@@ -79,6 +94,16 @@ def clean_languages(tags: Iterable[object], limit: int = MAX_AVAILABLE_LANGUAGES
     return sorted(seen.values(), key=str.casefold)[:limit]
 
 
+def _is_public_pin(addr: ipaddress.IPv4Address | ipaddress.IPv6Address, text: str) -> bool:
+    """A public unicast address, decided here rather than by the interpreter's
+    `is_global` table alone, which differs between Python releases."""
+    if "%" in text or not addr.is_global or addr.is_multicast:
+        return False
+    if isinstance(addr, ipaddress.IPv6Address) and addr not in _GLOBAL_UNICAST_V6:
+        return False
+    return not any(addr in net for net in _NOT_A_PIN if net.version == addr.version)
+
+
 def _valid_job_id(s: object) -> bool:
     if not isinstance(s, str) or len(s) != 36:
         return False
@@ -93,7 +118,8 @@ def validate_job(fields: Mapping[object, object]) -> Job:
 
     Every field must be a `str` (decode before calling). Unknown fields are
     ignored. `language` is optional but, when present, must be valid: an empty
-    value is rejected rather than read as "no language".
+    value is rejected rather than read as "no language". `resolved_ip` is optional
+    (empty means absent) but, when present, must be a public unicast address.
     """
     raw_id = fields.get("job_id")
     job_id = raw_id if isinstance(raw_id, str) and _valid_job_id(raw_id) else None
@@ -134,7 +160,7 @@ def validate_job(fields: Mapping[object, object]) -> Job:
         # The gateway pins www.youtube.com to this address. Loopback, private,
         # link-local (cloud metadata), multicast and scoped (`fe80::1%eth0`)
         # addresses are never a valid pin, whoever wrote the stream entry.
-        if "%" in ip or not addr.is_global or addr.is_multicast:
+        if not _is_public_pin(addr, ip):
             raise reject("resolved_ip is not a public address")
         resolved_ip = ip
     return Job(job_id=job_id, video_id=video_id, url=url, language=language, resolved_ip=resolved_ip)

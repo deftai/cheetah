@@ -145,12 +145,13 @@ def select_track(listing: TrackListing, requested: str | None) -> Selection:
         # An explicit original-speech request: only that native track will do.
         found = _match(native, want)
     else:
-        found = (
-            _match(manual, want)
-            or _match(native, want + "-orig")
-            or _match(native, want)
-            or _match(translated, want)
-        )
+        # A language we worked out ourselves may carry a region ("en-US") that the
+        # track tags lack ("en-orig"), so fall back to its primary subtag. A language
+        # the caller asked for is never widened that way.
+        wants = [want] if requested or "-" not in want else [want, _primary(want)]
+        found = next(
+            (t for w in wants if (t := _match(manual, w) or _match(native, w + "-orig") or _match(native, w))), None
+        ) or next((t for w in wants if (t := _match(translated, w))), None)
     if found is None:
         raise errors.no_track_in_language(want, available)
     return Selection(track=found, available_languages=tuple(available))

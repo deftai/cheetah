@@ -115,6 +115,15 @@ def test_unusable_files_fail_with_internal(data, reason):
     assert (e.value.code, e.value.message) == ("internal", errors.internal(reason).message)
 
 
+def test_huge_numeric_character_references_do_not_crash():
+    # html.unescape raises ValueError on a decimal reference of more than 4300 digits
+    # (Python's int-conversion limit); a caption's author controls that text.
+    for ref in ("&#" + "1" * 4301, "&#" + "1" * 4301 + ";", "&#x" + "1" * 5000 + ";", "&#" + "9" * 50 + ";"):
+        cues = parse_vtt(f"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nbefore {ref} after\n".encode())
+        assert cues[0].text.startswith("before ") and cues[0].text.endswith(" after")
+    assert parse_vtt(b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n&#65;&#x42;&#0000067;\n")[0].text == "ABC"
+
+
 def test_size_is_checked_before_parsing():
     big = b"WEBVTT\n\n" + b"00:00:01.000 --> 00:00:02.000\nx\n\n" * 10
     with pytest.raises(errors.TranscriptError) as e:
