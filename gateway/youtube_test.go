@@ -67,6 +67,13 @@ func TestYouTubeVideoID(t *testing.T) {
 		{"https://www.youtube.com/shorts/" + ytID + "/extra", ""},
 		{"https://youtu.be/", ""},
 		{"https://youtu.be/" + ytID + "/extra", ""},
+		// Playlist and channel-live embeds look like ids but are not videos.
+		{"https://www.youtube.com/embed/videoseries?list=PLabc", ""},
+		{"https://www.youtube.com/embed/live_stream?channel=UCabc", ""},
+		{"https://youtu.be/videoseries", ""},
+		{"https://www.youtube.com/watch?v=videoseries", ""},
+		// Lenient-but-harmless forms stay accepted: only the id is used.
+		{"https://www.youtube.com/watch/?v=" + ytID, ytID},
 		// Bad ids.
 		{"https://www.youtube.com/watch?v=short", ""},
 		{"https://www.youtube.com/watch?v=" + ytID + "x", ""},
@@ -125,6 +132,7 @@ func TestValidTranscriptLanguage(t *testing.T) {
 		}
 	}
 	for _, bad := range []string{
+		"all", "ALL", "All", "aLl",
 		"", "e", "english", "en_US", "en-", "-en", "en--US", "en-U", "en US", "en;rm", "en/../x",
 		"../../etc", "en\n", "1n", "en-%41%41", "en-orig-orig-orig-orig", strings.Repeat("a", 21), "ko-ørig",
 	} {

@@ -103,12 +103,33 @@ func YouTubeVideoID(rawURL string) (string, bool) {
 	default:
 		return "", false
 	}
-	if !isYouTubeID(id) {
+	// "videoseries" and "live_stream" are 11 valid id characters but are YouTube's
+	// playlist and channel-live embed pages, not videos.
+	if !isYouTubeID(id) || id == "videoseries" || id == "live_stream" {
 		return "", false
 	}
 	return id, true
 }
 
+// Worker contract (the transcript worker, a later slice, is the other half):
+//
+//   - It consumes the `transcript_jobs` stream. Each entry carries job_id, url,
+//     format ("markdown"), resolved_ip, strategy ("youtube_transcript"),
+//     video_id (always set) and language (only when the caller gave one).
+//   - `url` is always the canonical https://www.youtube.com/watch?v=<video_id>,
+//     built here from the validated id. Nothing from the submitted URL is
+//     forwarded, and the worker must not accept any other URL.
+//   - `video_id` matches [A-Za-z0-9_-]{11}. `language` matches
+//     validTranscriptLanguage: never empty-but-present, never "all", never starts
+//     with "-" or holds a path separator, whitespace or shell metacharacter. The
+//     worker must still pass it as a single argument and match it literally.
+//   - `resolved_ip` pins www.youtube.com only. It is not SSRF protection for the
+//     other hosts yt-dlp contacts (caption and video hosts), so the worker needs
+//     its own egress policy.
+//   - Nothing in the gateway checks that a worker is consuming the stream. If
+//     TRANSCRIPT_WORKER_ENABLED is true without one, jobs stay "queued" until
+//     their status expires. A worker heartbeat the gateway can check is planned
+//     with the worker itself.
 func canonicalYouTubeURL(id string) string {
 	return "https://www.youtube.com/watch?v=" + id
 }
@@ -119,7 +140,8 @@ func canonicalYouTubeURL(id string) string {
 var transcriptLanguagePattern = regexp.MustCompile(`^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8}){0,3}$`)
 
 func validTranscriptLanguage(s string) bool {
-	return len(s) <= 20 && transcriptLanguagePattern.MatchString(s)
+	// "all" fits the pattern but yt-dlp reads it as "every subtitle track".
+	return len(s) <= 20 && !strings.EqualFold(s, "all") && transcriptLanguagePattern.MatchString(s)
 }
 
 // transcriptURLError returns the video id for a supported URL, or a message

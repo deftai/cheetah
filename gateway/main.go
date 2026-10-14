@@ -20,7 +20,8 @@ type Config struct {
 	AIEndpointURL string
 	ProxySecret   string
 	// TranscriptWorker says a worker is consuming transcript_jobs. Off by
-	// default: the YouTube transcript tool is only offered when it is on.
+	// default: the YouTube transcript tool is only offered when it is on. It is
+	// an operator assertion; nothing verifies that a worker is actually running.
 	TranscriptWorker bool
 }
 
