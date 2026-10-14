@@ -1,6 +1,8 @@
 import pytest
 
 from transcript_worker import errors
+from transcript_worker.captions import Cue
+from transcript_worker.render import render_transcript
 from transcript_worker.tracks import Selection, TrackListing, select_track, tracks_from_info
 
 NATIVE = [{"ext": "vtt", "url": "https://www.youtube.com/api/timedtext?v=x&lang=en"}]
@@ -86,7 +88,7 @@ def test_a_bare_orig_key_does_not_become_the_spoken_language():
 
 def test_only_tags_a_caller_could_request_become_tracks_or_a_spoken_language():
     # These tags reach a yt-dlp --sub-langs argument later: "all" means every track, and a
-    # leading "-" is an exclusion. Both fit the permissive tag check but not the request one.
+    # leading "-" is an exclusion. Neither is a tag a caller could request.
     for bad in ("all", "ALL", "-en", "--proxy", "en-", "x"):
         listing = tracks_from_info({"subtitles": {bad: [{"url": "u"}], "en": [{"url": "u"}]}, "language": bad})
         assert [t.language for t in listing.tracks] == ["en"], bad
@@ -94,11 +96,8 @@ def test_only_tags_a_caller_could_request_become_tracks_or_a_spoken_language():
 
 
 def test_every_selectable_language_can_be_listed_and_rendered():
-    # The longest tag a caller can request (20 characters, three subtags) must work end to end:
+    # A long tag a caller can request (three subtags, 19 characters) must work end to end:
     # become a track, appear in available_languages, and render.
-    from transcript_worker.captions import Cue
-    from transcript_worker.render import render_transcript
-
     tag = "ca-Latn-ES-valencia"
     sel = select_track(tracks_from_info(info(manual=[tag])), tag)
     assert sel.track.language == tag and tag in sel.transcript_meta()["available_languages"]
