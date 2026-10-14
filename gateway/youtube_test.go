@@ -321,16 +321,28 @@ func TestExtractTranscriptRejectsBadInput(t *testing.T) {
 		if strings.Contains(text, "secret") || strings.Contains(text, "example.com") {
 			t.Fatalf("%v: error echoed the submitted URL: %q", tc.args, text)
 		}
+		for _, key := range []string{"url", "language"} {
+			// "url is required" legitimately names the field, so only values are checked.
+			if v, _ := tc.args[key].(string); len(v) > 4 && strings.Contains(text, v) {
+				t.Fatalf("%v: error echoed the submitted %s %q: %q", tc.args, key, v, text)
+			}
+		}
 	}
 }
 
-func TestExtractTranscriptAcceptsAValidRequestPastTheChecks(t *testing.T) {
-	// Past the pure checks the call needs DNS and a queue, so here it may fail at
-	// either, but never with one of this tool's own refusal messages.
-	text, _ := callTranscript(t, true, map[string]interface{}{"url": "https://youtu.be/" + ytID + "?t=5", "language": "ko-orig"})
-	for _, refusal := range []string{"only accepts", "not enabled", "language must", "url is required"} {
-		if strings.Contains(text, refusal) {
-			t.Fatalf("a valid request was refused with %q: %q", refusal, text)
-		}
+func TestExtractTranscriptValidRequestReachesDNSAndQueueStages(t *testing.T) {
+	// A valid request gets past every pure check and on to the stages that need
+	// the network. Where this test runs those stages may not be reachable, so each
+	// of the three real outcomes is accepted, and nothing else: the call
+	// succeeds, or it fails resolving the host (no DNS), or it fails enqueueing
+	// (no Redis). Any other text, including an empty one or a new refusal
+	// message, means the request was turned away before it got that far.
+	text, isErr := callTranscript(t, true, map[string]interface{}{"url": "https://youtu.be/" + ytID + "?t=5", "language": "ko-orig"})
+	switch {
+	case !isErr && strings.Contains(text, `"job_id"`) && strings.Contains(text, `"video_id":"`+ytID+`"`):
+	case isErr && strings.Contains(text, "cannot resolve hostname"):
+	case isErr && text == "failed to enqueue job":
+	default:
+		t.Fatalf("unexpected outcome for a valid request: isError=%v %q", isErr, text)
 	}
 }
