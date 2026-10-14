@@ -38,7 +38,11 @@ fn fail<T>(msg: impl Into<String>) -> Result<T> {
 /// Collapses control characters (newlines included) to spaces: titles come from
 /// third parties and must stay on one line.
 fn one_line(s: &str) -> String {
-    s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
+    // U+2028/U+2029 are not control characters but still end a line for Python's
+    // `splitlines()` and some Markdown renderers.
+    s.chars()
+        .map(|c| if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') { ' ' } else { c })
+        .collect()
 }
 
 /// Extractor registry. Slices that add a platform register it here; an

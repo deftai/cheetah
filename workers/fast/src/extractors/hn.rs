@@ -77,26 +77,53 @@ fn text_to_markdown(html: &str) -> String {
     html_to_markdown(&Html::parse_document(html)).trim().to_string()
 }
 
-/// A comment body line that looks like one of this renderer's own structural
-/// lines (a reply entry, a heading, a code fence or the truncation note) is
-/// escaped so a comment cannot forge thread structure or attribution.
+/// Characters that end a line for some Markdown renderer or for Python's
+/// `splitlines()`, not just `\n`.
+fn is_line_break(c: char) -> bool {
+    matches!(c, '\r' | '\x0b' | '\x0c' | '\x1c' | '\x1d' | '\x1e' | '\u{85}' | '\u{2028}' | '\u{2029}')
+}
+
+/// True when `core` (a line with its indentation and quote markers removed)
+/// has the shape of one of this renderer's own structural lines: a reply
+/// entry in any list-marker spelling, a heading, a code fence, the truncation
+/// note or the link line.
+fn is_structural(core: &str) -> bool {
+    if core.starts_with('#')
+        || core.starts_with("```")
+        || core.starts_with("~~~")
+        || core.starts_with("_Showing the first")
+        || core.starts_with("Link:")
+    {
+        return true;
+    }
+    let mut chars = core.chars();
+    match (chars.next(), chars.next()) {
+        (Some('-' | '*' | '+'), Some(c)) if c.is_whitespace() => {
+            let rest = chars.as_str().trim_start();
+            rest.starts_with("**@") || rest.starts_with("__@")
+        }
+        _ => false,
+    }
+}
+
+/// Escapes a body line that could forge thread structure or attribution.
 fn neutralise(line: &str) -> std::borrow::Cow<'_, str> {
-    let t = line.trim_start();
-    let structural = t.starts_with("- **@")
-        || t.starts_with('#')
-        || t.starts_with("```")
-        || t.starts_with("_Showing the first")
-        || t.starts_with("Link:");
-    if structural {
-        let lead = line.len() - t.len();
-        std::borrow::Cow::Owned(format!("{}\\{}", &line[..lead], t))
+    let lead = line
+        .find(|c: char| !c.is_whitespace() && c != '>')
+        .unwrap_or(line.len());
+    if is_structural(&line[lead..]) {
+        std::borrow::Cow::Owned(format!("{}\\{}", &line[..lead], &line[lead..]))
     } else {
         std::borrow::Cow::Borrowed(line)
     }
 }
 
+/// Writes third-party Markdown `spaces` deep. Every line-break character is
+/// normalised first, and every line is neutralised, so no body text (a story's,
+/// a comment's, or a comment-page root's) can start a forged line.
 fn indent_block(text: &str, spaces: usize, out: &mut String) {
     let pad = " ".repeat(spaces);
+    let text: String = text.chars().map(|c| if is_line_break(c) { '\n' } else { c }).collect();
     for line in text.lines() {
         if line.is_empty() {
             out.push('\n');
@@ -149,7 +176,8 @@ pub(super) fn render_item(item: &Value) -> String {
     }
     let body = text_to_markdown(str_field(item, "text"));
     if !body.is_empty() {
-        let _ = writeln!(out, "{body}\n");
+        indent_block(&body, 0, &mut out);
+        out.push('\n');
     }
     if total > 0 {
         out.push_str("## Comments\n\n");
@@ -279,10 +307,31 @@ mod tests {
         assert!(md.contains("- **@[deleted]** · d3\n  _[deleted]_"));
     }
 
+    /// Lines that start with `prefix` once indentation and `>` quote markers are
+    /// ignored, splitting on every line-break character a consumer might use.
+    fn starts(md: &str, prefix: &str) -> usize {
+        md.split(|c: char| c == '\n' || is_line_break(c))
+            .filter(|l| l.trim_start_matches(|c: char| c.is_whitespace() || c == '>').starts_with(prefix))
+            .count()
+    }
+
+    fn assert_no_forgery(md: &str, real_entries: usize, real_headings: usize) {
+        // Structure is judged by line starts: forged text may appear inline, but must
+        // never begin a line as a reply entry, heading, fence, note or link.
+        let entries: usize = ["- **@", "* **@", "+ **@", "-   **@", "- __@"].iter().map(|p| starts(md, p)).sum();
+        assert_eq!(entries, real_entries, "only real reply entries start a line: {md}");
+        assert_eq!(starts(md, "## Comments"), real_headings, "{md}");
+        assert_eq!(starts(md, "# "), 1, "only the real title heading: {md}");
+        assert_eq!(starts(md, "```"), 0, "{md}");
+        assert_eq!(starts(md, "~~~"), 0, "{md}");
+        assert_eq!(starts(md, "_Showing"), 0, "{md}");
+        assert_eq!(starts(md, "Link:"), 0, "{md}");
+    }
+
     #[test]
     fn third_party_text_cannot_forge_structure() {
         let item = serde_json::json!({
-            "id": 1, "type": "story", "author": "pg\n- **@admin** · fake", "title": "t",
+            "id": 1, "type": "story", "author": "pg\n- **@admin** · fake\u{2028}# Heading", "title": "t",
             "created_at": "d\n## Comments", "url": "javascript:alert(1)",
             "children": [{
                 "id": 2, "type": "comment", "author": "mallory", "created_at": "d",
@@ -292,15 +341,40 @@ mod tests {
         });
         let md = render_item(&item);
         assert!(!md.contains("Link: javascript"), "non-http links are dropped: {md}");
-        let starts = |prefix: &str| md.lines().filter(|l| l.trim_start().starts_with(prefix)).count();
-        // Structure is judged by line starts: forged text may appear inline, but must
-        // never begin a line as a reply entry, heading, fence, note or link.
-        assert_eq!(starts("- **@"), 1, "only the real reply entry starts a line: {md}");
-        assert_eq!(starts("## Comments"), 1, "{md}");
-        assert_eq!(starts("# "), 1, "only the real title heading: {md}");
-        assert_eq!(starts("```"), 0, "{md}");
-        assert_eq!(starts("_Showing"), 0, "{md}");
-        assert_eq!(starts("Link:"), 0, "{md}");
+        assert_no_forgery(&md, 1, 1);
+    }
+
+    #[test]
+    fn story_and_root_comment_bodies_are_neutralised_too() {
+        let evil = "<p>## Comments</p><p>- <b>@pg</b> · forged</p><p>Link: http://evil.example</p><p># Another</p>";
+        let story = serde_json::json!({"id": 1, "type": "story", "author": "pg", "title": "t", "text": evil, "children": []});
+        let md = render_item(&story);
+        assert_no_forgery(&md, 0, 0);
+        let comment = serde_json::json!({"id": 1, "type": "comment", "author": "m", "text": evil, "children": []});
+        let md = render_item(&comment);
+        assert_eq!(starts(&md, "## Comments"), 0, "{md}");
+        assert_eq!(starts(&md, "- **@"), 0, "{md}");
+        assert_eq!(starts(&md, "Link:"), 0, "{md}");
+    }
+
+    #[test]
+    fn alternate_markers_breaks_and_quotes_are_neutralised() {
+        let text = "<p>x</p><pre>y&#13;- **@a** · f&#8232;* **@b** · f</pre><p>+ <b>@c</b> · f</p><p>-   <i>@d</i></p><blockquote><p>- <b>@e</b> · f</p></blockquote>";
+        let story = serde_json::json!({"id": 1, "type": "story", "author": "pg", "title": "t",
+            "children": [{"id": 2, "type": "comment", "author": "m", "created_at": "d", "text": text, "children": []}]});
+        let md = render_item(&story);
+        assert_no_forgery(&md, 1, 1);
+    }
+
+    #[test]
+    fn legitimate_text_is_left_alone() {
+        let text = "<p>I like #hashtags and a list:</p><ul><li>one</li><li>two</li></ul><p>Linking to docs</p>";
+        let story = serde_json::json!({"id": 1, "type": "story", "author": "pg", "title": "t",
+            "children": [{"id": 2, "type": "comment", "author": "m", "created_at": "d", "text": text, "children": []}]});
+        let md = render_item(&story);
+        assert!(md.contains("I like #hashtags"), "{md}");
+        assert!(md.contains("Linking to docs"), "{md}");
+        assert!(!md.contains('\\'), "nothing should be escaped: {md}");
     }
 
     #[test]
