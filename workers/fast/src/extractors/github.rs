@@ -32,6 +32,8 @@ pub const API_BASE: &str = "https://api.github.com";
 const API_HOST: &str = "api.github.com";
 const ACCEPT_JSON: &str = "application/vnd.github+json";
 const ACCEPT_RAW: &str = "application/vnd.github.raw+json";
+/// Content type GitHub uses for raw file content (it ignores the `+json` suffix).
+const RAW_CONTENT_TYPE: &str = "application/vnd.github.raw";
 
 /// GitHub responses are capped well below the generic page limit: comment
 /// threads become a JSON tree plus rendered text, several times their size.
@@ -52,10 +54,13 @@ static RATE_LIMITED_UNTIL: AtomicU64 = AtomicU64::new(0);
 
 /// Positive-only cache of repositories already confirmed public, which saves
 /// an API call (and rate-limit budget) per job when a token is configured.
-#[derive(Default)]
 struct PublicCache(Mutex<HashMap<String, Instant>>);
 
 impl PublicCache {
+    fn new() -> Self {
+        Self(Mutex::new(HashMap::new()))
+    }
+
     fn is_fresh(&self, key: &str, now: Instant) -> bool {
         let map = self.0.lock().unwrap_or_else(|e| e.into_inner());
         map.get(key)
@@ -74,7 +79,7 @@ impl PublicCache {
     }
 }
 
-static PUBLIC_REPOS: LazyLock<PublicCache> = LazyLock::new(PublicCache::default);
+static PUBLIC_REPOS: LazyLock<PublicCache> = LazyLock::new(PublicCache::new);
 
 #[derive(Debug, PartialEq)]
 pub(super) enum Kind {
@@ -198,8 +203,14 @@ fn cooldown_until(status: u16, headers: &reqwest::header::HeaderMap, now: u64) -
     Some(until.clamp(now + 1, now + MAX_COOLDOWN_SECS))
 }
 
-/// Returns the body of a successful response, or an extractor error.
-async fn api_get(client: &Client, url: Url, accept: &str, config: &FetchConfig) -> Result<Vec<u8>> {
+/// A successful response: its body and whether GitHub answered with the raw
+/// media type (file content) rather than JSON.
+struct ApiResponse {
+    body: Vec<u8>,
+    raw: bool,
+}
+
+async fn api_fetch(client: &Client, url: Url, accept: &str, config: &FetchConfig) -> Result<ApiResponse> {
     if now_secs() < RATE_LIMITED_UNTIL.load(Ordering::Relaxed) {
         return fail("GitHub API rate limit cooldown in effect");
     }
@@ -224,7 +235,30 @@ async fn api_get(client: &Client, url: Url, accept: &str, config: &FetchConfig) 
     if !status.is_success() {
         return fail(format!("GitHub API returned {status}"));
     }
-    read_body_capped(resp, config.max_body_size.min(MAX_API_BODY)).await
+    let raw = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with(RAW_CONTENT_TYPE));
+    let body = read_body_capped(resp, config.max_body_size.min(MAX_API_BODY)).await?;
+    Ok(ApiResponse { body, raw })
+}
+
+/// Returns the body of a successful JSON request, or an extractor error.
+async fn api_get(client: &Client, url: Url, accept: &str, config: &FetchConfig) -> Result<Vec<u8>> {
+    Ok(api_fetch(client, url, accept, config).await?.body)
+}
+
+/// Fetches README or file text. The contents API answers a directory (or a
+/// symlink or submodule) with JSON metadata even when the raw media type was
+/// requested, so the response's content type, not its body, says whether this
+/// really is file content.
+async fn api_get_text(client: &Client, url: Url, config: &FetchConfig) -> Result<String> {
+    let resp = api_fetch(client, url, ACCEPT_RAW, config).await?;
+    if !resp.raw {
+        return fail("path is a directory, symlink or submodule, not a file");
+    }
+    utf8_text(resp.body)
 }
 
 /// With a token configured, only public repositories are read: the token may
@@ -265,31 +299,6 @@ fn utf8_text(body: Vec<u8>) -> Result<String> {
         return fail("content is empty");
     }
     Ok(text)
-}
-
-/// The contents API answers a directory (and symlink or submodule) path with
-/// JSON metadata even when raw content was requested; that must not be passed
-/// off as the file's text.
-fn is_contents_metadata(text: &str) -> bool {
-    let trimmed = text.trim_start();
-    if !trimmed.starts_with(['[', '{']) {
-        return false;
-    }
-    let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
-        return false;
-    };
-    let entry = |v: &Value| {
-        v.get("sha").is_some()
-            && v.get("path").is_some()
-            && matches!(
-                v.get("type").and_then(Value::as_str),
-                Some("file" | "dir" | "symlink" | "submodule")
-            )
-    };
-    match &value {
-        Value::Array(items) => !items.is_empty() && items.iter().all(entry),
-        other => entry(other) && other.get("type").and_then(Value::as_str) != Some("file"),
-    }
 }
 
 /// Wraps text in a code fence long enough that the text cannot close it.
@@ -377,17 +386,14 @@ pub(super) async fn extract_with_base(
     let (title, markdown, raw) = match kind {
         Kind::Readme => {
             let api = build_url(base, &["repos", &owner, &repo, "readme"], &[])?;
-            let text = utf8_text(api_get(client, api, ACCEPT_RAW, config).await?)?;
+            let text = api_get_text(client, api, config).await?;
             (format!("{owner}/{repo}"), text.clone(), text)
         }
         Kind::File { git_ref, path } => {
             let mut segs = vec!["repos", owner.as_str(), repo.as_str(), "contents"];
             segs.extend(path.iter().map(String::as_str));
             let api = build_url(base, &segs, &[("ref", &git_ref)])?;
-            let text = utf8_text(api_get(client, api, ACCEPT_RAW, config).await?)?;
-            if is_contents_metadata(&text) {
-                return fail("path is a directory, symlink or submodule, not a file");
-            }
+            let text = api_get_text(client, api, config).await?;
             let name = path.join("/");
             let md = if name.to_ascii_lowercase().ends_with(".md") {
                 text.clone()
@@ -597,21 +603,8 @@ mod tests {
     }
 
     #[test]
-    fn detects_contents_api_metadata() {
-        let dir = r#"[{"type":"file","name":"a","path":"src/a","sha":"x"},{"type":"dir","name":"b","path":"src/b","sha":"y"}]"#;
-        assert!(is_contents_metadata(dir));
-        assert!(is_contents_metadata(r#"{"type":"symlink","path":"l","sha":"x","target":"t"}"#));
-        assert!(is_contents_metadata(r#"{"type":"submodule","path":"m","sha":"x"}"#));
-        // Real file contents that merely look like JSON are not metadata.
-        assert!(!is_contents_metadata(r#"{"name":"pkg","version":"1.0.0"}"#));
-        assert!(!is_contents_metadata("[1, 2, 3]"));
-        assert!(!is_contents_metadata("[]"));
-        assert!(!is_contents_metadata("plain text"));
-    }
-
-    #[test]
     fn public_cache_expires_and_is_bounded() {
-        let cache = PublicCache::default();
+        let cache = PublicCache::new();
         let t0 = Instant::now();
         assert!(!cache.is_fresh("o/r", t0));
         cache.insert("o/r".into(), t0);
@@ -698,6 +691,15 @@ mod tests {
     /// Serves canned `(status, body)` replies keyed by request path prefix and
     /// records each raw request so tests can inspect headers.
     async fn fake_api(routes: Vec<(&'static str, u16, &'static [u8])>) -> (String, Seen) {
+        fake_api_with_json(routes, &[]).await
+    }
+
+    /// Like `fake_api`, but replies under `json_prefixes` always use the JSON
+    /// content type, as the real contents API does for directories.
+    async fn fake_api_with_json(
+        routes: Vec<(&'static str, u16, &'static [u8])>,
+        json_prefixes: &'static [&'static str],
+    ) -> (String, Seen) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let seen: Seen = Arc::new(Mutex::new(vec![]));
@@ -715,6 +717,13 @@ mod tests {
                     let n = sock.read(&mut buf).await.unwrap_or(0);
                     let req = String::from_utf8_lossy(&buf[..n]).to_string();
                     let path = req.split_whitespace().nth(1).unwrap_or("").to_string();
+                    let wants_raw = req.to_ascii_lowercase().contains("accept: application/vnd.github.raw");
+                    let raw = wants_raw && !json_prefixes.iter().any(|p| path.starts_with(p));
+                    let content_type = if raw {
+                        "application/vnd.github.raw+json; charset=utf-8"
+                    } else {
+                        "application/json; charset=utf-8"
+                    };
                     seen.lock().unwrap().push(req);
                     let (status, body) = routes
                         .iter()
@@ -722,7 +731,7 @@ mod tests {
                         .map(|(_, s, b)| (*s, *b))
                         .unwrap_or((404, b"not found"));
                     let head = format!(
-                        "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        "HTTP/1.1 {status} X\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                         body.len()
                     );
                     let _ = sock.write_all(head.as_bytes()).await;
@@ -807,16 +816,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn directory_and_wasm_responses_fall_back() {
-        let (base, _) = fake_api(vec![
-            (
-                "/repos/o/r/contents/src",
-                200,
-                br#"[{"type":"file","name":"a.rs","path":"src/a.rs","sha":"x"}]"#,
-            ),
-            ("/repos/o/r/contents/m.wasm", 200, b"\0asm\x01\0\0\0"),
-            ("/repos/o/r/contents/package.json", 200, br#"{"name":"pkg"}"#),
-        ])
+    async fn directory_and_wasm_responses_fall_back_but_json_files_do_not() {
+        let (base, _) = fake_api_with_json(
+            vec![
+                (
+                    "/repos/o/r/contents/src",
+                    200,
+                    br#"[{"type":"file","name":"a.rs","path":"src/a.rs","sha":"x"}]"#,
+                ),
+                ("/repos/o/r/contents/m.wasm", 200, b"\0asm\x01\0\0\0"),
+                ("/repos/o/r/contents/package.json", 200, br#"{"name":"pkg"}"#),
+                // A real file whose text looks exactly like a contents listing.
+                (
+                    "/repos/o/r/contents/fixture.json",
+                    200,
+                    br#"[{"sha":"abc","path":"src/a.rs","type":"file"}]"#,
+                ),
+            ],
+            &["/repos/o/r/contents/src"],
+        )
         .await;
         let c = Client::new();
         for url in [
@@ -826,11 +844,14 @@ mod tests {
             let err = extract_with_base(&base, &c, url, &cfg()).await.unwrap_err();
             assert!(matches!(err, Error::Extractor(_)), "{url}: {err:?}");
         }
-        // A genuine JSON file is still returned as a file.
         let ok = extract_with_base(&base, &c, "https://github.com/o/r/blob/main/package.json", &cfg())
             .await
             .unwrap();
         assert!(ok.markdown.contains("\"name\":\"pkg\""));
+        let fixture = extract_with_base(&base, &c, "https://github.com/o/r/blob/main/fixture.json", &cfg())
+            .await
+            .unwrap();
+        assert!(fixture.markdown.contains("src/a.rs"), "file content must not be mistaken for a listing");
     }
 
     #[tokio::test]
