@@ -123,6 +123,9 @@ def test_non_string_values_are_rejected_not_coerced():
         "::a9fe:a9fe", "::ffff:0:7f00:1", "::ffff:8.8.8.8", "fec0::1", "5f00::1", "2002:7f00:1::", "2002:808:808::",
         "2001::1", "2001:db8::1", "2001:2::1", "192.88.99.1", "192.0.0.9", "192.0.0.10", "192.31.196.1",
         "192.52.193.1", "192.175.48.1", "198.51.100.7", "203.0.113.9", "198.18.0.1", "240.0.0.1", "255.255.255.255",
+        "2607:f8b0:4004:c07::65%eth0",  # a public address with a zone id: only the `%` rule rejects it
+        "2001:1::1",  # global on current Pythons: only the 2001::/23 entry rejects it
+        "3fff::1", "3fff:fff:ffff::1",  # RFC 9637 documentation, which older is_global tables do not know
     ],
     ids=lambda s: repr(s),
 )

@@ -225,13 +225,13 @@ def test_the_output_never_exceeds_the_cap_when_it_succeeds():
             assert len(out.encode()) <= cap
 
 
-@pytest.mark.parametrize("ticks", [0, 5, 40])
-def test_the_size_table_is_exact_at_every_boundary(ticks):
+@pytest.mark.parametrize("ticks, stride", [(0, 20), (5, 20), (40, 20), (3, 100)])
+def test_the_size_table_is_exact_at_every_boundary(ticks, stride):
     # A cap equal to the exact byte length of a k-line output keeps exactly k lines;
     # one byte less keeps fewer. (size() can only be wrong by a byte or two, which
     # coarse cap tests cannot see.)
     cs = [
-        Cue(float(i * 20), "`" * (i % ticks + 1 if ticks else 0) + f" caption \u65e5\u672c {i}") for i in range(60)
+        Cue(float(i * stride), "`" * (i % ticks + 1 if ticks else 0) + f" caption \u65e5\u672c {i}") for i in range(60)
     ]
     full = make(cues=cs, max_bytes=10**9)
     for k in range(1, len(cs)):
@@ -248,6 +248,20 @@ def test_the_size_table_is_exact_at_every_boundary(ticks):
             assert shorter == full or shorter.count("\n[") < k
     assert make(cues=cs, max_bytes=len(full.encode())) == full
     assert "cut off" in make(cues=cs, max_bytes=len(full.encode()) - 1)
+
+
+def test_the_cap_counts_the_bytes_of_a_non_ascii_title():
+    title = "\u65e5\u672c\u8a9e" * 50  # 150 characters, 450 bytes
+    out = make(title=title, cues=[Cue(float(i * 20), "w" * 20) for i in range(60)], max_bytes=900)
+    assert len(out.encode()) <= 900 and "cut off" in out
+
+
+def test_the_cap_can_keep_all_but_one_line():
+    # With long lines the cut-off note is smaller than a line, so cutting the last line
+    # off is the best fit one byte below the full size.
+    cs = [Cue(float(i * 20), "w" * 300) for i in range(5)]
+    full = make(cues=cs)
+    assert make(cues=cs, max_bytes=len(full.encode()) - 1) == make(cues=cs[:4]) + render._cut_off_note(cs[3].start)
 
 
 def test_a_full_size_transcript_is_cleaned_once_per_line():

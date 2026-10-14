@@ -119,6 +119,18 @@ def _match(candidates: list[Track], want: str) -> Track | None:
     return None
 
 
+def _find(wants: list[str], manual: list[Track], native: list[Track], translated: list[Track]) -> Track | None:
+    """The best track for the first of `wants` that has one: manual, then native
+    (`<lang>-orig` first), and only when no want has either, a translated track."""
+    for w in wants:
+        if t := _match(manual, w) or _match(native, w + "-orig") or _match(native, w):
+            return t
+    for w in wants:
+        if t := _match(translated, w):
+            return t
+    return None
+
+
 def select_track(listing: TrackListing, requested: str | None) -> Selection:
     """Picks the caption track to fetch, or raises TranscriptError
     (`no_captions`, `no_track_in_language`)."""
@@ -149,9 +161,7 @@ def select_track(listing: TrackListing, requested: str | None) -> Selection:
         # track tags lack ("en-orig"), so fall back to its primary subtag. A language
         # the caller asked for is never widened that way.
         wants = [want] if requested or "-" not in want else [want, _primary(want)]
-        found = next(
-            (t for w in wants if (t := _match(manual, w) or _match(native, w + "-orig") or _match(native, w))), None
-        ) or next((t for w in wants if (t := _match(translated, w))), None)
+        found = _find(wants, manual, native, translated)
     if found is None:
         raise errors.no_track_in_language(want, available)
     return Selection(track=found, available_languages=tuple(available))

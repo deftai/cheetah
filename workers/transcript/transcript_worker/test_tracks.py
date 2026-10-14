@@ -69,6 +69,11 @@ def test_a_regional_spoken_language_still_finds_the_original_speech_track():
         pick(info(native=["en-orig"]), "en-US")
 
 
+def test_a_regional_spoken_language_falls_back_to_a_translated_track_by_primary_subtag():
+    assert pick(info(translated=["en", "fr"], language="en-US")).kind == "translated"
+    assert pick(info(translated=["en", "fr"], language="en-US")).language == "en"
+
+
 def test_declared_language_wins_over_orig_track():
     i = info(manual=["en"], native=["ko-orig"], language="en")
     assert tracks_from_info(i).spoken_language == "en"

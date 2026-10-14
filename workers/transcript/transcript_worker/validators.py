@@ -38,6 +38,7 @@ _NOT_A_PIN = tuple(
         "2001::/23",  # IETF protocol assignments, Teredo, benchmarking, ORCHID
         "2001:db8::/32",  # documentation
         "2002::/16",  # 6to4: embeds an IPv4 address
+        "3fff::/20",  # documentation (RFC 9637); older is_global tables do not list it
     )
 )
 
