@@ -2,6 +2,7 @@ package main
 
 import (
 	"net"
+	"strings"
 	"testing"
 )
 
@@ -209,5 +210,93 @@ func TestValidateScrapeURL_ReturnsPinnedIP(t *testing.T) {
 	}
 	if isPrivateIP(parsed) {
 		t.Fatalf("returned IP %q is private", ip)
+	}
+}
+
+func TestParseSubmittedURL(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		host string // expected Hostname; "" means must be rejected
+	}{
+		{"plain", "https://example.com/a/b?x=1#frag", "example.com"},
+		{"port", "http://example.com:8080/x", "example.com"},
+		{"userinfo", "https://user:pw@example.com/x", "example.com"},
+		{"ipv6 port", "http://[2001:db8::1]:443/x", "2001:db8::1"},
+		{"fragment host confusion", "https://github.com#@evil.example/o/r", ""},
+		{"fragment host confusion path", "https://github.com#@evil.example", ""},
+		{"query host confusion", "https://github.com?@evil.example/o/r", "github.com"},
+		{"userinfo with fragment", "https://a@github.com#@evil.example/o/r", ""},
+		{"backslash authority", `https://github.com\@evil.example/o/r`, ""},
+		{"backslash path", `https://example.com/a\b`, ""},
+		{"query then fragment @", "https://example.com?x#@evil", "example.com"},
+		{"backslash before query", `https://h\?x`, ""},
+		{"backslash before fragment", `https://h\#x`, ""},
+		{"backslash in query", `https://example.com/s?q=a\b`, "example.com"},
+		{"backslash in fragment", `https://example.com/s#a\b`, "example.com"},
+		{"fragment directly after host", "https://example.com#top", ""},
+		{"fragment colon port", "https://github.com#:80@evil.example/", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			u, err := parseSubmittedURL(tt.raw)
+			if tt.host == "" {
+				if err == nil {
+					t.Fatalf("expected rejection, got host %q", u.Hostname())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if u.Hostname() != tt.host {
+				t.Fatalf("host = %q, want %q", u.Hostname(), tt.host)
+			}
+		})
+	}
+}
+
+// Classification must never pick a platform strategy for a URL the validator
+// rejects, and must classify accepted URLs by the validated host.
+func TestClassifyUsesValidatedHost(t *testing.T) {
+	for _, raw := range []string{
+		"https://github.com#@evil.example/o/r",
+		"https://github.com#@evil.example",
+		`https://github.com\@evil.example/o/r`,
+		"https://u@github.com#@evil.example/o/r",
+	} {
+		if _, err := parseSubmittedURL(raw); err == nil {
+			t.Errorf("%q should be rejected", raw)
+		}
+		if d := ClassifyURL(raw); d.Strategy != "" {
+			t.Errorf("%q rejected by validator but classified with strategy %q", raw, d.Strategy)
+		}
+	}
+	for _, raw := range []string{
+		"https://github.com?@evil.example/o/r", // host github.com, but no owner/repo path
+		"https://u@github.com:443/o/r",
+	} {
+		u, err := parseSubmittedURL(raw)
+		if err != nil || u.Hostname() != "github.com" {
+			t.Errorf("%q: host=%v err=%v, want github.com", raw, u, err)
+		}
+	}
+	if d := ClassifyURL("https://u@github.com:443/o/r"); d.Strategy != StrategyGitHubRepo {
+		t.Errorf("accepted github URL: strategy %q, want %q", d.Strategy, StrategyGitHubRepo)
+	}
+}
+
+func TestParseSubmittedURLErrorOmitsCredentials(t *testing.T) {
+	for _, raw := range []string{
+		"https://user:s3cret@example.com:99999x/", // fails url.Parse
+		"s3cret@example.com",                      // passes url.Parse, fails url.ParseRequestURI
+	} {
+		_, err := parseSubmittedURL(raw)
+		if err == nil {
+			t.Fatalf("%q: expected error", raw)
+		}
+		if strings.Contains(err.Error(), "s3cret") {
+			t.Fatalf("%q: error leaks credentials: %v", raw, err)
+		}
 	}
 }

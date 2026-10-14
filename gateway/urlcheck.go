@@ -1,18 +1,53 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/url"
+	"strings"
 )
+
+// parseSubmittedURL is the single parse shared by classification and SSRF
+// validation. url.Parse splits off the fragment before reading the authority
+// while url.ParseRequestURI does not, so inputs such as
+// "https://github.com#@evil.example/o/r" yield different hosts. Such URLs are
+// ambiguous (other HTTP clients may disagree too) and are rejected: the URL
+// must parse identically under both parsers, and its authority/path (the part
+// before any query or fragment) must contain no backslashes, which WHATWG-style
+// clients treat as "/".
+func parseSubmittedURL(rawURL string) (*url.URL, error) {
+	if strings.ContainsRune(beforeQueryOrFragment(rawURL), '\\') {
+		return nil, errors.New("url contains backslash")
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, redactURLError(err)
+	}
+	r, err := url.ParseRequestURI(rawURL)
+	if err != nil {
+		return nil, redactURLError(err)
+	}
+	if u.Scheme != r.Scheme || u.Host != r.Host || u.User.String() != r.User.String() {
+		return nil, errors.New("ambiguous url authority")
+	}
+	return u, nil
+}
+
+func beforeQueryOrFragment(rawURL string) string {
+	if i := strings.IndexAny(rawURL, "?#"); i >= 0 {
+		return rawURL[:i]
+	}
+	return rawURL
+}
 
 // ValidateScrapeURL validates that rawURL is safe for server-side fetching.
 // It rejects non-http(s) schemes and URLs that resolve to private/reserved IPs.
 // On success it returns the first validated IP so callers can pin it in the job
 // payload, closing the TOCTOU window between validation and worker fetch.
 func ValidateScrapeURL(rawURL string) (string, error) {
-	u, err := url.ParseRequestURI(rawURL)
+	u, err := parseSubmittedURL(rawURL)
 	if err != nil {
 		log.Printf("url validation failed: %v", err)
 		return "", fmt.Errorf("invalid url")
@@ -131,4 +166,14 @@ func isPrivateIP(ip net.IP) bool {
 		return isPrivateIP(net.IP(ip16[2:6]))
 	}
 	return false
+}
+
+// redactURLError drops the quoted input that *url.Error embeds, since the
+// submitted URL may carry credentials (userinfo) or tokens that must not be logged.
+func redactURLError(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return fmt.Errorf("%s: %w", ue.Op, ue.Err)
+	}
+	return err
 }

@@ -115,7 +115,7 @@ var hashRouterPatterns = []string{
 }
 
 func ClassifyURL(rawURL string) RouteDecision {
-	parsed, err := url.Parse(rawURL)
+	parsed, err := parseSubmittedURL(rawURL)
 	if err != nil {
 		return RouteDecision{Tier: TierFast, Reason: "unparseable URL", Confidence: 0.3}
 	}
