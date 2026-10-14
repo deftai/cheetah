@@ -36,7 +36,7 @@ func ValidateScrapeURL(rawURL string) (string, error) {
 	for _, ipStr := range ips {
 		ip := net.ParseIP(ipStr)
 		if ip == nil {
-			continue
+			return "", fmt.Errorf("url resolves to an unparseable IP address")
 		}
 		if isPrivateIP(ip) {
 			return "", fmt.Errorf("url resolves to a private or reserved IP address")
