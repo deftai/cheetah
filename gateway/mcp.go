@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -321,28 +323,70 @@ func validGitHubName(s string) bool {
 	return true
 }
 
+// decodeRefSegment mirrors the worker's `decode_segment` for a blob ref or path
+// segment: percent-decode, then refuse anything that could escape its position
+// (empty, dot segments, separators, control characters, invalid UTF-8).
+func decodeRefSegment(raw string) (string, bool) {
+	dec, err := url.PathUnescape(raw)
+	if err != nil || dec == "" || dec == "." || dec == ".." || !utf8.ValidString(dec) {
+		return "", false
+	}
+	for _, r := range dec {
+		if r == '/' || r == '\\' || unicode.IsControl(r) {
+			return "", false
+		}
+	}
+	return dec, true
+}
+
+// rawSegments splits a still-encoded path into its non-empty segments. The
+// worker parses the raw path (a `%2F` is one segment, not two), so the gateway
+// must too. A segment that is a dot segment in any spelling (`.`, `..`, `%2e`),
+// or a path with a backslash (the worker's URL parser treats it as `/`), is
+// reported as unusable rather than normalised: stricter than the worker, never
+// looser.
+func rawSegments(escapedPath string) ([]string, bool) {
+	if strings.Contains(escapedPath, `\`) {
+		return nil, false
+	}
+	var segs []string
+	for _, p := range strings.Split(escapedPath, "/") {
+		if p == "" {
+			continue
+		}
+		if dec, err := url.PathUnescape(p); err != nil || dec == "." || dec == ".." {
+			return nil, false
+		}
+		segs = append(segs, p)
+	}
+	return segs, true
+}
+
 // platformURLSupported reports whether rawURL is a page the strategy's
 // extractor handles. It mirrors the worker's own URL rules (workers/fast
 // extractors), so a URL the worker would only fall back on is refused here
-// with a clear error instead of being reported as extracted.
+// with a clear error instead of being reported as extracted. Where the two
+// could differ it errs on the strict side.
 func platformURLSupported(strategy, rawURL string) bool {
 	u, err := url.Parse(rawURL)
 	if err != nil || u.Scheme != "https" {
 		return false
 	}
+	if port := u.Port(); port != "" {
+		if n, err := strconv.ParseUint(port, 10, 32); err != nil || n > 65535 {
+			return false
+		}
+	}
 	host := strings.ToLower(u.Hostname())
+	escaped := u.EscapedPath()
 	switch strategy {
 	case StrategyGitHubRepo:
 		if host != "github.com" && host != "www.github.com" {
 			return false
 		}
-		var segs []string
-		for _, p := range strings.Split(u.Path, "/") {
-			if p != "" {
-				segs = append(segs, p)
-			}
-		}
-		if len(segs) < 2 || !validGitHubName(segs[0]) || !validGitHubName(strings.TrimSuffix(segs[1], ".git")) {
+		segs, ok := rawSegments(escaped)
+		// Owner and repo are never percent-encoded in the worker's rules.
+		if !ok || len(segs) < 2 || !validGitHubName(segs[0]) || !validGitHubName(strings.TrimSuffix(segs[1], ".git")) {
 			return false
 		}
 		rest := segs[2:]
@@ -351,14 +395,30 @@ func platformURLSupported(strategy, rawURL string) bool {
 			return true
 		case rest[0] == "blob":
 			// /blob/<ref>/<path...>; a trailing slash names a directory.
-			return len(rest) >= 3 && !strings.HasSuffix(u.Path, "/")
+			if len(rest) < 3 || strings.HasSuffix(escaped, "/") {
+				return false
+			}
+			for _, seg := range rest[1:] {
+				if _, ok := decodeRefSegment(seg); !ok {
+					return false
+				}
+			}
+			return true
 		case (rest[0] == "issues" || rest[0] == "pull") && len(rest) == 2:
 			_, err := strconv.ParseUint(rest[1], 10, 64)
 			return isDigits(rest[1], 20) && err == nil
 		}
 		return false
 	case StrategyHNThread:
-		return host == "news.ycombinator.com" && u.Path == "/item" && isDigits(u.Query().Get("id"), 10)
+		if host != "news.ycombinator.com" || escaped != "/item" {
+			return false
+		}
+		q, err := url.ParseQuery(u.RawQuery)
+		if err != nil {
+			return false
+		}
+		ids := q["id"]
+		return len(ids) > 0 && isDigits(ids[0], 10)
 	}
 	return false
 }

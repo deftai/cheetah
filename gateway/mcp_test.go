@@ -461,6 +461,30 @@ func TestPlatformToolError(t *testing.T) {
 		{"get_repository_content", "https://github.com/o/r/actions/runs/1", "not supported"},
 		{"get_thread", "http://news.ycombinator.com/item?id=1", "not supported"},
 		{"get_thread", "https://news.ycombinator.com/item?id=12345678901", "not supported"},
+		// Gateway and worker must agree on the raw URL, not the decoded one.
+		{"get_repository_content", "https://github.com/o%2Fr", "not supported"},
+		{"get_repository_content", "https://github.com/%41/r", "not supported"},
+		{"get_repository_content", "https://github.com/o/r%2Fx", "not supported"},
+		{"get_repository_content", "https://github.com/o/r/blob/main%2Ffoo", "not supported"},
+		{"get_repository_content", "https://github.com/o/r/blob/a/b%2Fc", "not supported"},
+		{"get_repository_content", "https://github.com/o/r/blob/main/a%5Cb", "not supported"},
+		{"get_repository_content", "https://github.com/o/r/blob/main/a%00b", "not supported"},
+		{"get_repository_content", "https://github.com/o/r/blob/main/%FF.md", "not supported"},
+		{"get_repository_content", "https://github.com/o/r/blob/main/..", "not supported"},
+		{"get_repository_content", "https://github.com/o/r/blob/main/.", "not supported"},
+		{"get_repository_content", "https://github.com/o/r/blob/main/%2e%2E/x", "not supported"},
+		{"get_repository_content", "https://github.com/o/r/blob/../x/y", "not supported"},
+		{"get_repository_content", `https://github.com/o/r/blob/main/a\b`, "not supported"},
+		{"get_repository_content", "https://github.com:99999/o/r", "not supported"},
+		{"get_thread", "https://news.ycombinator.com/%69tem?id=1", "not supported"},
+		{"get_thread", "https://news.ycombinator.com/item?id=%zz&id=5", "not supported"},
+		{"get_thread", "https://news.ycombinator.com:99999/item?id=1", "not supported"},
+		{"get_thread", "https://news.ycombinator.com/item?id=", `use "scrape"`}, // the router already refuses an empty id
+		// Encoded characters that the worker does decode stay supported.
+		{"get_repository_content", "https://github.com/o/r/blob/main/My%20Doc%C3%A9.md", ""},
+		{"get_repository_content", "https://github.com/o/r/blob/feat%2Bx/src/lib.rs", ""},
+		{"get_thread", "https://news.ycombinator.com/item?id=8863&p=2", ""},
+		{"get_thread", "https://news.ycombinator.com/item?id=8863#c_8864", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.tool+" "+tt.url, func(t *testing.T) {
