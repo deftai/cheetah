@@ -78,6 +78,15 @@ YOUTUBE_ROLLING = (
 )
 
 
+def test_timestamps_may_omit_the_hour_and_use_a_comma():
+    # WebVTT's MM:SS.mmm form (no hour field) and SRT-style commas both parse.
+    vtt = (
+        b"WEBVTT\n\n01:23.456 --> 01:25.000\nhello\n\n1:02.003 --> 1:03.000 align:start\nthere\n\n"
+        b"00:00:05,500 --> 00:00:06,000\nlast\n\n100:00:01.000 --> 100:00:02.000\nlong\n"
+    )
+    assert texts(parse_vtt(vtt)) == [(83.456, "hello"), (62.003, "there"), (5.5, "last"), (360001.0, "long")]
+
+
 def test_a_line_holding_only_spaces_does_not_end_a_cue():
     # Only an empty line ends a cue; splitting on whitespace-only lines lost the
     # first cue's text and stamped it two seconds late.
