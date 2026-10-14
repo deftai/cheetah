@@ -220,12 +220,13 @@ func handleHealthDiagnostic(queue *QueueClient, transcriptEnabled bool) fiber.Ha
 					// transcript tier "active" means seen recently in the transcript
 					// group: the same test the extract_transcript gate applies.
 					if s.tier == tierTranscript {
-						if n, err := queue.freshTranscriptConsumers(ctx); err == nil {
-							wh.ActiveConsumers = n
-						} else {
-							wh.ActiveConsumers = 0
+						n, err := queue.freshTranscriptConsumers(ctx)
+						if err != nil {
+							// Not knowing is reported as no worker (degraded), and logged.
 							log.Printf("health check: transcript consumers: %v", err)
+							n = 0
 						}
+						wh.ActiveConsumers = n
 					}
 				}
 

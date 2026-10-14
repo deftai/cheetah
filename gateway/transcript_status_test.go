@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -133,6 +135,47 @@ func TestTranscriptWorkerAliveNeverCachesAnError(t *testing.T) {
 	}
 	if _, fresh := q.transcriptLive.get(time.Now()); fresh {
 		t.Fatal("a context error must not be cached")
+	}
+}
+
+// stallingRedis accepts connections, reads whatever is sent, and never replies:
+// a Redis that is up but not answering.
+func stallingRedis(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("cannot listen on loopback here: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				io.Copy(io.Discard, conn)
+			}()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+func TestTranscriptWorkerAliveEnforcesItsDeadlineWhenRedisStalls(t *testing.T) {
+	q := NewQueueClient(stallingRedis(t))
+	start := time.Now()
+	alive, err := q.TranscriptWorkerAlive(context.Background())
+	elapsed := time.Since(start)
+
+	if err == nil || alive {
+		t.Fatalf("a Redis that never answers must be an error, not 'no worker' or 'alive': (%v, %v)", alive, err)
+	}
+	if limit := transcriptLivenessTimeout + 750*time.Millisecond; elapsed > limit {
+		t.Fatalf("the check took %v against a %v limit: the context deadline is not being enforced", elapsed, transcriptLivenessTimeout)
+	}
+	if _, fresh := q.transcriptLive.get(time.Now()); fresh {
+		t.Fatal("a timed-out check must not be cached")
 	}
 }
 

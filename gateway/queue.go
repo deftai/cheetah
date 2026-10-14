@@ -39,6 +39,11 @@ func NewQueueClient(addr string) *QueueClient {
 	if err != nil {
 		opts = &redis.Options{Addr: addr}
 	}
+	// Without this go-redis ignores a context's deadline while waiting for a
+	// reply and uses only its own read timeout (and retries), so a Redis that
+	// accepts a command and stalls would hold a caller far past the deadline
+	// it set (the liveness check's one second, the health endpoint's three).
+	opts.ContextTimeoutEnabled = true
 	rdb := redis.NewClient(opts)
 	return &QueueClient{rdb: rdb, transcriptLive: livenessCache{ttl: transcriptLivenessTTL}}
 }
