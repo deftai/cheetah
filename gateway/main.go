@@ -21,7 +21,8 @@ type Config struct {
 	ProxySecret   string
 	// TranscriptWorker says a worker is consuming transcript_jobs. Off by
 	// default: the YouTube transcript tool is only offered when it is on. It is
-	// an operator assertion; nothing verifies that a worker is actually running.
+	// an operator assertion, and the gateway then checks for a live consumer
+	// before it queues a transcript job.
 	TranscriptWorker bool
 }
 
@@ -137,7 +138,7 @@ func NewApp(cfg Config, queue *QueueClient, opts ...AppOption) *fiber.App {
 		return c.Next()
 	})
 
-	v1.Get("/health", handleHealthDiagnostic(queue))
+	v1.Get("/health", handleHealthDiagnostic(queue, cfg.TranscriptWorker))
 	v1.Post("/scrape", handleScrape(queue))
 	v1.Post("/crawl", handleCrawl(queue))
 	v1.Post("/extract", handleExtract(queue, cfg.AIEndpointURL))

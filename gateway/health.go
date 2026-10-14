@@ -14,16 +14,29 @@ const (
 	healthTimeout    = 3 * time.Second
 	livenessCacheTTL = 5 * time.Second
 	tierFast         = "fast"
+	tierTranscript   = "transcript"
 )
 
-var monitoredStreams = []struct {
+type monitoredStream struct {
 	stream string
 	tier   string
-}{
+}
+
+var baseMonitoredStreams = []monitoredStream{
 	{"scrape_jobs", tierFast},
 	{"browser_jobs", "browser"},
 	{"stealth_jobs", "stealth"},
 	{"crawl_jobs", "crawl"},
+}
+
+// monitoredStreamsFor adds the transcript stream only when the transcript
+// worker is enabled, so deployments without it do not report a worker tier
+// that can never exist.
+func monitoredStreamsFor(transcriptEnabled bool) []monitoredStream {
+	if !transcriptEnabled {
+		return baseMonitoredStreams
+	}
+	return append(append([]monitoredStream{}, baseMonitoredStreams...), monitoredStream{transcriptStream, tierTranscript})
 }
 
 type HealthResponse struct {
@@ -68,19 +81,19 @@ type streamSnapshot struct {
 	err    error
 }
 
-func (q *QueueClient) streamInfoBatch(ctx context.Context) map[string]streamSnapshot {
-	out := make(map[string]streamSnapshot, len(monitoredStreams))
+func (q *QueueClient) streamInfoBatch(ctx context.Context, streams []monitoredStream) map[string]streamSnapshot {
+	out := make(map[string]streamSnapshot, len(streams))
 
 	pipe := q.rdb.Pipeline()
-	xlenCmds := make(map[string]*redis.IntCmd, len(monitoredStreams))
-	xinfoCmds := make(map[string]*redis.XInfoGroupsCmd, len(monitoredStreams))
-	for _, s := range monitoredStreams {
+	xlenCmds := make(map[string]*redis.IntCmd, len(streams))
+	xinfoCmds := make(map[string]*redis.XInfoGroupsCmd, len(streams))
+	for _, s := range streams {
 		xlenCmds[s.stream] = pipe.XLen(ctx, s.stream)
 		xinfoCmds[s.stream] = pipe.XInfoGroups(ctx, s.stream)
 	}
 	_, _ = pipe.Exec(ctx)
 
-	for _, s := range monitoredStreams {
+	for _, s := range streams {
 		snap := streamSnapshot{}
 		snap.length, snap.err = xlenCmds[s.stream].Result()
 		if snap.err != nil {
@@ -158,7 +171,8 @@ func handleHealthLiveness(queue *QueueClient) fiber.Handler {
 	}
 }
 
-func handleHealthDiagnostic(queue *QueueClient) fiber.Handler {
+func handleHealthDiagnostic(queue *QueueClient, transcriptEnabled bool) fiber.Handler {
+	streams := monitoredStreamsFor(transcriptEnabled)
 	return func(c *fiber.Ctx) error {
 		ctx, cancel := context.WithTimeout(context.Background(), healthTimeout)
 		defer cancel()
@@ -177,9 +191,9 @@ func handleHealthDiagnostic(queue *QueueClient) fiber.Handler {
 		workers := make(map[string]WorkerHealth)
 
 		if pingErr == nil {
-			snapshots := queue.streamInfoBatch(ctx)
+			snapshots := queue.streamInfoBatch(ctx, streams)
 
-			for _, s := range monitoredStreams {
+			for _, s := range streams {
 				snap := snapshots[s.stream]
 				qh := QueueHealth{Length: snap.length}
 				wh := WorkerHealth{}
@@ -200,6 +214,19 @@ func handleHealthDiagnostic(queue *QueueClient) fiber.Handler {
 
 					if wh.ActiveConsumers > 0 {
 						wh.IdleMs = queue.minConsumerIdle(ctx, s.stream, snap.groups)
+					}
+
+					// A crashed worker's consumer stays registered forever, so for the
+					// transcript tier "active" means seen recently in the transcript
+					// group: the same test the extract_transcript gate applies.
+					if s.tier == tierTranscript {
+						n, err := queue.freshTranscriptConsumers(ctx)
+						if err != nil {
+							// Not knowing is reported as no worker (degraded), and logged.
+							log.Printf("health check: transcript consumers: %v", err)
+							n = 0
+						}
+						wh.ActiveConsumers = n
 					}
 				}
 
@@ -253,6 +280,12 @@ func computeOverallStatus(r RedisHealth, workers map[string]WorkerHealth) string
 
 	fastWorker, hasFast := workers[tierFast]
 	if !hasFast || fastWorker.ActiveConsumers == 0 {
+		return "degraded"
+	}
+
+	// The transcript tier is only reported when the operator enabled it, so a
+	// missing worker there is a fault, not an absent optional feature.
+	if tw, ok := workers[tierTranscript]; ok && tw.ActiveConsumers == 0 {
 		return "degraded"
 	}
 
