@@ -4,6 +4,7 @@ import (
 	"net"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -39,7 +40,8 @@ func TestGatewayListensDualStack(t *testing.T) {
 	defer app.Shutdown()
 
 	_, port, _ := net.SplitHostPort(ln.Addr().String())
-	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	// A short timeout makes a listener that accepts but never answers fail fast.
+	client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
 	for _, host := range []string{"[::1]", "127.0.0.1"} {
 		// Static route: /health pings Redis, which is not running here.
 		resp, err := client.Get("http://" + host + ":" + port + "/.well-known/mcp.json")
