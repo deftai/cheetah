@@ -7,8 +7,9 @@
 //! generic fetch, so it cannot loop.
 
 pub mod github;
+pub mod hn;
 
-use crate::{fetch_page, FetchConfig, PageResult, Result};
+use crate::{fetch_page, Error, FetchConfig, PageResult, Result};
 use futures_util::future::BoxFuture;
 use reqwest::Client;
 use std::future::Future;
@@ -25,11 +26,27 @@ pub type ExtractorFn = for<'a> fn(
     Option<IpAddr>,
 ) -> BoxFuture<'a, Result<PageResult>>;
 
+/// Maps any error to `Error::Extractor` with a fixed message.
+fn ex<E>(msg: &'static str) -> impl FnOnce(E) -> Error {
+    move |_| Error::Extractor(msg.to_string())
+}
+
+fn fail<T>(msg: impl Into<String>) -> Result<T> {
+    Err(Error::Extractor(msg.into()))
+}
+
+/// Collapses control characters (newlines included) to spaces: titles come from
+/// third parties and must stay on one line.
+fn one_line(s: &str) -> String {
+    s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
+}
+
 /// Extractor registry. Slices that add a platform register it here; an
 /// unregistered strategy is ignored and the page is fetched generically.
 pub fn lookup(strategy: &str) -> Option<ExtractorFn> {
     match strategy {
         "github_repo" => Some(github::extract),
+        "hn_thread" => Some(hn::extract),
         _ => None,
     }
 }
@@ -173,6 +190,7 @@ mod tests {
     #[test]
     fn registry_resolves_known_strategies_only() {
         assert!(lookup("github_repo").is_some());
+        assert!(lookup("hn_thread").is_some());
         assert!(lookup("no_such_strategy").is_none());
         assert!(lookup("").is_none());
     }
@@ -229,4 +247,69 @@ mod tests {
         assert!(out.result.is_err());
         assert_eq!(out.fallback_from.as_deref(), Some("hn_thread"));
     }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    pub(crate) type Seen = Arc<Mutex<Vec<String>>>;
+
+    /// Serves canned `(status, body)` replies keyed by request path prefix and
+    /// records each raw request so tests can inspect headers.
+    pub(crate) async fn fake_api(routes: Vec<(&'static str, u16, &'static [u8])>) -> (String, Seen) {
+        fake_api_with_json(routes, &[]).await
+    }
+
+    /// Like `fake_api`, but replies under `json_prefixes` always use the JSON
+    /// content type, as the real contents API does for directories.
+    pub(crate) async fn fake_api_with_json(
+        routes: Vec<(&'static str, u16, &'static [u8])>,
+        json_prefixes: &'static [&'static str],
+    ) -> (String, Seen) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let seen: Seen = Arc::new(Mutex::new(vec![]));
+        let seen2 = seen.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => return,
+                };
+                let routes = routes.clone();
+                let seen = seen2.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let path = req.split_whitespace().nth(1).unwrap_or("").to_string();
+                    let wants_raw = req.to_ascii_lowercase().contains("accept: application/vnd.github.raw");
+                    let raw = wants_raw && !json_prefixes.iter().any(|p| path.starts_with(p));
+                    let content_type = if raw {
+                        "application/vnd.github.raw+json; charset=utf-8"
+                    } else {
+                        "application/json; charset=utf-8"
+                    };
+                    seen.lock().unwrap().push(req);
+                    let (status, body) = routes
+                        .iter()
+                        .find(|(p, _, _)| path.starts_with(p))
+                        .map(|(_, s, b)| (*s, *b))
+                        .unwrap_or((404, b"not found"));
+                    let head = format!(
+                        "HTTP/1.1 {status} X\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = sock.write_all(head.as_bytes()).await;
+                    let _ = sock.write_all(body).await;
+                });
+            }
+        });
+        (base, seen)
+    }
+
+
 }
