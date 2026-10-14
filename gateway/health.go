@@ -215,6 +215,18 @@ func handleHealthDiagnostic(queue *QueueClient, transcriptEnabled bool) fiber.Ha
 					if wh.ActiveConsumers > 0 {
 						wh.IdleMs = queue.minConsumerIdle(ctx, s.stream, snap.groups)
 					}
+
+					// A crashed worker's consumer stays registered forever, so for the
+					// transcript tier "active" means seen recently in the transcript
+					// group: the same test the extract_transcript gate applies.
+					if s.tier == tierTranscript {
+						if n, err := queue.freshTranscriptConsumers(ctx); err == nil {
+							wh.ActiveConsumers = n
+						} else {
+							wh.ActiveConsumers = 0
+							log.Printf("health check: transcript consumers: %v", err)
+						}
+					}
 				}
 
 				queues[s.stream] = qh

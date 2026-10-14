@@ -47,21 +47,34 @@ const (
 	// transcriptGroup is the consumer group the transcript worker joins.
 	transcriptGroup = "transcript-workers"
 	// transcriptWorkerMaxIdle is how long a consumer may go without touching the
-	// stream and still count as running. A worker blocked in XREADGROUP (at most
-	// a few seconds per call) keeps its idle time far below this even while
-	// jobs run.
+	// stream and still count as running. This is a REQUIREMENT on the worker, not
+	// something the gateway can make true: it must keep calling XREADGROUP with a
+	// short BLOCK (5 s at most) on a thread that is not busy running a job, so
+	// its idle time stays well below this even while jobs run. A worker that
+	// blocks on a long job, or uses BLOCK 0, is reported as not running.
 	transcriptWorkerMaxIdle = 30 * time.Second
-	transcriptLivenessTTL   = 5 * time.Second
+	transcriptLivenessTTL   = livenessCacheTTL
+	// transcriptLivenessTimeout bounds the Redis call, so a slow Redis cannot
+	// hold a request open (and a slow answer is an error, not "no worker").
+	transcriptLivenessTimeout = time.Second
 )
+
+// countFreshConsumers is the number of consumers seen within maxIdle. The
+// gateway's liveness gate and /v1/health both use it, so they cannot disagree
+// about whether a transcript worker is present.
+func countFreshConsumers(consumers []redis.XInfoConsumer, maxIdle time.Duration) int {
+	n := 0
+	for _, c := range consumers {
+		if c.Idle < maxIdle {
+			n++
+		}
+	}
+	return n
+}
 
 // anyFreshConsumer reports whether some consumer has been seen within maxIdle.
 func anyFreshConsumer(consumers []redis.XInfoConsumer, maxIdle time.Duration) bool {
-	for _, c := range consumers {
-		if c.Idle < maxIdle {
-			return true
-		}
-	}
-	return false
+	return countFreshConsumers(consumers, maxIdle) > 0
 }
 
 // isNoGroupErr matches Redis's answer for a stream or consumer group that does
@@ -111,6 +124,19 @@ func workerLiveness(consumers []redis.XInfoConsumer, err error, maxIdle time.Dur
 	return anyFreshConsumer(consumers, maxIdle), nil
 }
 
+// freshTranscriptConsumers counts the transcript group's consumers seen
+// recently, for /v1/health. It applies the same test as the liveness gate.
+func (q *QueueClient) freshTranscriptConsumers(ctx context.Context) (int, error) {
+	consumers, err := q.rdb.XInfoConsumers(ctx, transcriptStream, transcriptGroup).Result()
+	if err != nil {
+		if isNoGroupErr(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return countFreshConsumers(consumers, transcriptWorkerMaxIdle), nil
+}
+
 // TranscriptWorkerAlive reports whether a transcript worker is consuming the
 // transcript stream: the consumer group exists and one of its consumers was
 // seen recently.
@@ -118,6 +144,8 @@ func (q *QueueClient) TranscriptWorkerAlive(ctx context.Context) (bool, error) {
 	if ok, fresh := q.transcriptLive.get(time.Now()); fresh {
 		return ok, nil
 	}
+	ctx, cancel := context.WithTimeout(ctx, transcriptLivenessTimeout)
+	defer cancel()
 	consumers, err := q.rdb.XInfoConsumers(ctx, transcriptStream, transcriptGroup).Result()
 	ok, lerr := workerLiveness(consumers, err, transcriptWorkerMaxIdle)
 	if lerr != nil {

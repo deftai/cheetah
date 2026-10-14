@@ -126,11 +126,14 @@ func YouTubeVideoID(rawURL string) (string, bool) {
 //   - `resolved_ip` pins www.youtube.com only. It is not SSRF protection for the
 //     other hosts yt-dlp contacts (caption and video hosts), so the worker needs
 //     its own egress policy.
-//   - The worker joins consumer group transcriptGroup and keeps polling the
-//     stream (XREADGROUP with a short BLOCK) even while jobs run. The gateway
-//     treats a consumer idle for less than transcriptWorkerMaxIdle as running
-//     and refuses to queue a job when there is none ("transcript worker is not
-//     running").
+//   - The worker must join consumer group transcriptGroup and keep calling
+//     XREADGROUP with a short BLOCK (5 s at most) on a thread that is not busy
+//     running a job, so it keeps showing as recently seen while jobs run. The
+//     gateway treats a consumer idle for less than transcriptWorkerMaxIdle as
+//     running and refuses to queue a job when there is none ("transcript worker
+//     is not running"). It should also use a stable consumer name per replica
+//     and delete its own stale consumers: every restart under a new name leaves
+//     one behind in the group.
 //   - On failure the worker writes status "failed" plus a JobError (see
 //     models.go) and acks; there is no fallback scrape. On success it writes
 //     the usual result with metadata.strategy "youtube_transcript" and a

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -89,6 +90,49 @@ func TestTranscriptWorkerGate(t *testing.T) {
 	// positive answer came back alongside the error.
 	if msg := transcriptWorkerGate(true, errors.New("boom")); msg != "failed to check the transcript worker" {
 		t.Fatalf("an error must refuse even when alive is true: %q", msg)
+	}
+}
+
+func TestCountFreshConsumersAgreesWithAnyFresh(t *testing.T) {
+	const max = 30 * time.Second
+	cs := []redis.XInfoConsumer{{Idle: time.Second}, {Idle: time.Hour}, {Idle: 29 * time.Second}, {Idle: max}, {Idle: 10 * time.Minute}}
+	if got := countFreshConsumers(cs, max); got != 2 {
+		t.Fatalf("countFreshConsumers = %d, want 2 (a crashed worker's lingering consumer must not count)", got)
+	}
+	if !anyFreshConsumer(cs, max) || anyFreshConsumer(cs[1:2], max) || anyFreshConsumer(nil, max) {
+		t.Fatal("anyFreshConsumer must be exactly countFreshConsumers > 0")
+	}
+}
+
+func TestTranscriptWorkerAliveServesTheCacheWithoutRedis(t *testing.T) {
+	// Redis is a port nothing listens on: a fresh cached answer, positive or
+	// negative, must be returned without ever reaching it.
+	for _, want := range []bool{true, false} {
+		q := NewQueueClient("127.0.0.1:1")
+		q.transcriptLive.set(want, time.Now())
+		got, err := q.TranscriptWorkerAlive(context.Background())
+		if err != nil || got != want {
+			t.Fatalf("cached %v: got (%v, %v), want (%v, nil)", want, got, err, want)
+		}
+	}
+}
+
+func TestTranscriptWorkerAliveNeverCachesAnError(t *testing.T) {
+	q := NewQueueClient("127.0.0.1:1")
+	if alive, err := q.TranscriptWorkerAlive(context.Background()); err == nil || alive {
+		t.Fatalf("an unreachable Redis must be an error, not 'no worker' or 'alive': (%v, %v)", alive, err)
+	}
+	if _, fresh := q.transcriptLive.get(time.Now()); fresh {
+		t.Fatal("an error must not be cached: the next call has to ask Redis again")
+	}
+	// A context that is already over also fails fast and is not cached.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if alive, err := q.TranscriptWorkerAlive(ctx); err == nil || alive {
+		t.Fatalf("a cancelled context must be an error: (%v, %v)", alive, err)
+	}
+	if _, fresh := q.transcriptLive.get(time.Now()); fresh {
+		t.Fatal("a context error must not be cached")
 	}
 }
 
