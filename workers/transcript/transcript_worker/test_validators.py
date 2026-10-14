@@ -139,6 +139,13 @@ def test_public_resolved_ips_are_accepted(ip):
     assert validate_job(fields(resolved_ip=ip)).resolved_ip == ip
 
 
+def test_a_present_but_null_resolved_ip_is_rejected_not_read_as_absent():
+    entry = fields()
+    entry["resolved_ip"] = None
+    with pytest.raises(JobRejected):
+        validate_job(entry)
+
+
 def test_empty_resolved_ip_means_absent():
     assert validate_job(fields(resolved_ip="")).resolved_ip is None
 

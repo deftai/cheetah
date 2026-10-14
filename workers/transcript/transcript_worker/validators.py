@@ -149,8 +149,8 @@ def validate_job(fields: Mapping[object, object]) -> Job:
         assert isinstance(lang, str)
         language = lang
     resolved_ip: str | None = None
-    if "resolved_ip" in fields and fields["resolved_ip"] != "":
-        ip = fields["resolved_ip"]
+    ip = fields.get("resolved_ip", "")  # absent or empty means no pin; anything else must be a public IP
+    if ip != "":
         # ip_address() also accepts ints, which are not what a stream carries.
         if not isinstance(ip, str):
             raise reject("resolved_ip is not an IP address")

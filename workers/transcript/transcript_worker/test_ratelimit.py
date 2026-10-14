@@ -77,6 +77,10 @@ def test_retry_after_seconds_and_dates():
     assert parse_retry_after("99999") == MAX_RETRY_AFTER
     assert parse_retry_after("1" * 30) == MAX_RETRY_AFTER
     assert parse_retry_after("Wed, 21 Oct 2026 07:28:30 GMT", now_epoch=1792567700.0) == pytest.approx(10.0)
+    # Non-ASCII digits satisfy str.isdigit() but int() cannot parse the superscripts and
+    # circled digits among them: the isascii() guard keeps them from raising.
+    for bad in ["\u00b2", "\u00b3", "\u00b9", "\uff11", "1\u00b2", "\u2460", "\u0663"]:
+        assert parse_retry_after(bad, now_epoch=1792567700.0) is None, bad
     for bad in [None, "", "abc", "-5", "0", "1.5", "\u0663", "Wed, 21 Oct 2015 07:28:00 GMT", 5, b"5"]:
         assert parse_retry_after(bad, now_epoch=1792567700.0) is None, bad
 
