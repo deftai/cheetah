@@ -480,6 +480,15 @@ func TestPlatformToolError(t *testing.T) {
 		{"get_thread", "https://news.ycombinator.com/item?id=%zz&id=5", "not supported"},
 		{"get_thread", "https://news.ycombinator.com:99999/item?id=1", "not supported"},
 		{"get_thread", "https://news.ycombinator.com/item?id=", `use "scrape"`}, // the router already refuses an empty id
+		// A path with characters Go re-escapes must not change how `%2F` is read.
+		{"get_repository_content", "https://github.com/o/r/blob/main/a%2Fb|c", "not supported"},
+		{"get_repository_content", "https://github.com/o/r/blob/main/a%2Fb/é", "not supported"},
+		{"get_repository_content", "https://github.com/o/r/blob/ma%2Fin/x|", "not supported"},
+		{"get_repository_content", "https://github.com/o/r/blob/main/a|b.md", ""},
+		{"get_repository_content", "https://github.com/o/r/blob/main/é.md", ""},
+		{"get_repository_content", "https://github.com/o/r/blob/main/dir/é/", "not supported"},
+		{"get_repository_content", "https://github.com/o/r/blob/main/x?y=%2F#a/b", ""},
+		{"get_repository_content", "HTTPS://github.com/o/r", ""},
 		// Whitespace is stripped by the worker's parser but not Go's, so it is refused.
 		{"get_repository_content", "https://github.com/o/r/blob/main/dir/ ", "not supported"},
 		{"get_repository_content", "https://github.com/o/r/blob/main/ ", "not supported"},

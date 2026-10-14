@@ -362,6 +362,27 @@ func rawSegments(escapedPath string) ([]string, bool) {
 	return segs, true
 }
 
+// rawPathOf returns the path of an https URL exactly as written: everything
+// after the authority up to the first `?` or `#`. Go's `URL.EscapedPath` is not
+// used because it discards the written form (turning `%2F` into `/`) whenever
+// the path holds a character Go would itself escape, such as `|` or non-ASCII.
+func rawPathOf(rawURL string) (string, bool) {
+	const prefix = "https://"
+	if len(rawURL) < len(prefix) || !strings.EqualFold(rawURL[:len(prefix)], prefix) {
+		return "", false
+	}
+	rest := rawURL[len(prefix):]
+	i := strings.IndexAny(rest, "/?#")
+	if i < 0 || rest[i] != '/' {
+		return "", true
+	}
+	path := rest[i:]
+	if j := strings.IndexAny(path, "?#"); j >= 0 {
+		path = path[:j]
+	}
+	return path, true
+}
+
 // platformURLSupported reports whether rawURL is a page the strategy's
 // extractor handles. It mirrors the worker's own URL rules (workers/fast
 // extractors), so a URL the worker would only fall back on is refused here
@@ -386,7 +407,10 @@ func platformURLSupported(strategy, rawURL string) bool {
 		}
 	}
 	host := strings.ToLower(u.Hostname())
-	escaped := u.EscapedPath()
+	escaped, ok := rawPathOf(rawURL)
+	if !ok {
+		return false
+	}
 	switch strategy {
 	case StrategyGitHubRepo:
 		if host != "github.com" && host != "www.github.com" {
