@@ -368,6 +368,14 @@ func rawSegments(escapedPath string) ([]string, bool) {
 // with a clear error instead of being reported as extracted. Where the two
 // could differ it errs on the strict side.
 func platformURLSupported(strategy, rawURL string) bool {
+	// The worker's URL parser strips surrounding whitespace and control
+	// characters (WHATWG), Go's does not, so `.../dir/ ` would be a directory to
+	// the worker but a file name here. A legitimate URL has none, only `%20`.
+	for _, r := range rawURL {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return false
+		}
+	}
 	u, err := url.Parse(rawURL)
 	if err != nil || u.Scheme != "https" {
 		return false

@@ -480,6 +480,13 @@ func TestPlatformToolError(t *testing.T) {
 		{"get_thread", "https://news.ycombinator.com/item?id=%zz&id=5", "not supported"},
 		{"get_thread", "https://news.ycombinator.com:99999/item?id=1", "not supported"},
 		{"get_thread", "https://news.ycombinator.com/item?id=", `use "scrape"`}, // the router already refuses an empty id
+		// Whitespace is stripped by the worker's parser but not Go's, so it is refused.
+		{"get_repository_content", "https://github.com/o/r/blob/main/dir/ ", "not supported"},
+		{"get_repository_content", "https://github.com/o/r/blob/main/ ", "not supported"},
+		{"get_repository_content", "https://github.com/o/r/blob/main/a.go ", "not supported"},
+		{"get_repository_content", "https://github.com/o/r/blob/main/a\u00a0b.go", "not supported"},
+		{"get_thread", "https://news.ycombinator.com/item?id=1 ", `use "scrape"`}, // the router already refuses a non-numeric id
+		{"get_repository_content", " https://github.com/o/r", `use "scrape"`},
 		// Encoded characters that the worker does decode stay supported.
 		{"get_repository_content", "https://github.com/o/r/blob/main/My%20Doc%C3%A9.md", ""},
 		{"get_repository_content", "https://github.com/o/r/blob/feat%2Bx/src/lib.rs", ""},
