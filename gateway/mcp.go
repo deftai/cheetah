@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 
 	"github.com/gofiber/fiber/v2"
@@ -38,6 +39,28 @@ var mcpTools = []mcpTool{
 				"format": {"type": "string", "enum": ["markdown", "html", "text"], "description": "Output format (default: markdown)"},
 				"include_patterns": {"type": "array", "items": {"type": "string"}, "description": "URL patterns to include"},
 				"exclude_patterns": {"type": "array", "items": {"type": "string"}, "description": "URL patterns to exclude"}
+			},
+			"required": ["url"]
+		}`),
+	},
+	{
+		Name:        "get_repository_content",
+		Description: "Get the content of a GitHub repository page as markdown: a repository README, a file (github.com/<owner>/<repo>/blob/<ref>/<path>), or an issue or pull request thread with its comments. Only accepts GitHub URLs; use scrape for other pages.",
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"url": {"type": "string", "description": "A GitHub repository, file, issue or pull request URL"}
+			},
+			"required": ["url"]
+		}`),
+	},
+	{
+		Name:        "get_thread",
+		Description: "Get a Hacker News story or comment thread, with its full comment tree, as markdown. Only accepts Hacker News item URLs (https://news.ycombinator.com/item?id=<id>); use scrape for other pages.",
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"url": {"type": "string", "description": "A Hacker News item URL"}
 			},
 			"required": ["url"]
 		}`),
@@ -195,6 +218,8 @@ func handleMCPToolCall(c *fiber.Ctx, req jsonrpcRequest, queue *QueueClient, aiE
 		return mcpScrape(c, req, params, queue)
 	case "crawl":
 		return mcpCrawl(c, req, params, queue)
+	case "get_repository_content", "get_thread":
+		return mcpPlatformTool(c, req, params, queue)
 	case "extract":
 		return mcpExtract(c, req, params, queue, aiEndpoint)
 	default:
@@ -244,6 +269,81 @@ func mcpScrape(c *fiber.Ctx, rpc jsonrpcRequest, params toolCallParams, queue *Q
 
 	LogRouteDecision(jobID, args.URL, decision)
 	return mcpToolSuccess(c, rpc, map[string]interface{}{"success": true, "job_id": jobID})
+}
+
+// platformTool describes an MCP tool that serves one platform's URLs through
+// that platform's extractor.
+type platformTool struct {
+	strategy string // the router strategy the URL must classify as
+	accepts  string // what the tool accepts, for the error message
+}
+
+var platformTools = map[string]platformTool{
+	"get_repository_content": {
+		strategy: StrategyGitHubRepo,
+		accepts:  "a GitHub repository, file, issue or pull request URL (github.com/<owner>/<repo>[/blob/<ref>/<path> | /issues/<n> | /pull/<n>])",
+	},
+	"get_thread": {
+		strategy: StrategyHNThread,
+		accepts:  "a Hacker News item URL (https://news.ycombinator.com/item?id=<id>)",
+	},
+}
+
+// platformToolError returns "" when decision is a URL the tool serves, and
+// otherwise a message saying what the tool accepts and where the URL belongs.
+// It never repeats the submitted URL, which may carry credentials in its query.
+func platformToolError(tool string, decision RouteDecision) string {
+	spec := platformTools[tool]
+	if decision.Strategy == spec.strategy {
+		return ""
+	}
+	hint := `use "scrape" for other pages`
+	for other, o := range platformTools {
+		if other != tool && decision.Strategy == o.strategy {
+			hint = fmt.Sprintf("this URL belongs to %q", other)
+			break
+		}
+	}
+	return fmt.Sprintf("%s only accepts %s; %s", tool, spec.accepts, hint)
+}
+
+func mcpPlatformTool(c *fiber.Ctx, rpc jsonrpcRequest, params toolCallParams, queue *QueueClient) error {
+	var args struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(params.Arguments, &args); err != nil || args.URL == "" {
+		return mcpToolError(c, rpc, "url is required")
+	}
+
+	// The platform check is a pure classification, so a wrong-platform URL is
+	// refused before any DNS lookup or queue access.
+	decision := ClassifyURL(args.URL)
+	if msg := platformToolError(params.Name, decision); msg != "" {
+		return mcpToolError(c, rpc, msg)
+	}
+
+	resolvedIP, err := ValidateScrapeURL(args.URL)
+	if err != nil {
+		return mcpToolError(c, rpc, err.Error())
+	}
+
+	plan, _ := c.Locals("plan").(Plan)
+	if !IsTierAllowed(decision.Tier, plan.AllowedTiers) {
+		return mcpToolError(c, rpc, "this URL requires the "+string(decision.Tier)+" tier, upgrade your plan")
+	}
+
+	// Extractors produce markdown, so the format is fixed; the strategy is the
+	// one the URL already classified as, so the worker runs the right extractor
+	// and falls back to a plain fetch if it cannot.
+	scrapeReq := ScrapeRequest{URL: args.URL, Format: "markdown", ResolvedIP: resolvedIP, Strategy: decision.Strategy}
+	jobID, err := queue.EnqueueScrape(c.Context(), scrapeReq, callerOwner(c), StreamForTier(decision.Tier))
+	if err != nil {
+		log.Printf("mcp enqueue %s error: %v", params.Name, err)
+		return mcpToolError(c, rpc, "failed to enqueue job")
+	}
+
+	LogRouteDecision(jobID, args.URL, decision)
+	return mcpToolSuccess(c, rpc, map[string]interface{}{"success": true, "job_id": jobID, "strategy": decision.Strategy})
 }
 
 func mcpCrawl(c *fiber.Ctx, rpc jsonrpcRequest, params toolCallParams, queue *QueueClient) error {

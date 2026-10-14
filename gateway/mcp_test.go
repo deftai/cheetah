@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gofiber/fiber/v2"
@@ -39,15 +40,15 @@ func TestMCPDiscoveryReturnsTools(t *testing.T) {
 	if result.Endpoint != "/v1/mcp" {
 		t.Fatalf("expected endpoint=/v1/mcp, got %s", result.Endpoint)
 	}
-	if len(result.Tools) != 3 {
-		t.Fatalf("expected 3 tools, got %d", len(result.Tools))
+	if len(result.Tools) != 5 {
+		t.Fatalf("expected 5 tools, got %d", len(result.Tools))
 	}
 
 	names := map[string]bool{}
 	for _, tool := range result.Tools {
 		names[tool.Name] = true
 	}
-	for _, want := range []string{"scrape", "crawl", "extract"} {
+	for _, want := range []string{"scrape", "crawl", "extract", "get_repository_content", "get_thread"} {
 		if !names[want] {
 			t.Fatalf("missing tool: %s", want)
 		}
@@ -149,8 +150,8 @@ func TestMCPToolsList(t *testing.T) {
 	if !ok {
 		t.Fatal("missing tools array")
 	}
-	if len(tools) != 3 {
-		t.Fatalf("expected 3 tools, got %d", len(tools))
+	if len(tools) != 5 {
+		t.Fatalf("expected 5 tools, got %d", len(tools))
 	}
 }
 
@@ -394,5 +395,118 @@ func TestMCPToolCallExtractRequiresSchema(t *testing.T) {
 	r := result["result"].(map[string]interface{})
 	if r["isError"] != true {
 		t.Fatal("expected isError=true when extract_schema missing")
+	}
+}
+
+func toolResultText(t *testing.T, result map[string]interface{}) (string, bool) {
+	t.Helper()
+	r, ok := result["result"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("missing result: %v", result)
+	}
+	content, ok := r["content"].([]interface{})
+	if !ok || len(content) == 0 {
+		t.Fatalf("missing content in tool result: %v", r)
+	}
+	text, _ := content[0].(map[string]interface{})["text"].(string)
+	isError, _ := r["isError"].(bool)
+	return text, isError
+}
+
+func callPlatformTool(t *testing.T, tool string, args map[string]interface{}) (string, bool) {
+	t.Helper()
+	body := mcpRequest("tools/call", 30, map[string]interface{}{"name": tool, "arguments": args})
+	_, result := postMCP(t, testApp(), body)
+	return toolResultText(t, result)
+}
+
+func TestPlatformToolError(t *testing.T) {
+	const github = "https://github.com/rockbox37/cheetah"
+	const hn = "https://news.ycombinator.com/item?id=8863"
+	tests := []struct {
+		tool, url string
+		want      string // substring of the error, or "" for accepted
+	}{
+		{"get_repository_content", github, ""},
+		{"get_repository_content", github + "/blob/main/README.md", ""},
+		{"get_repository_content", github + "/issues/5", ""},
+		{"get_thread", hn, ""},
+		{"get_repository_content", hn, `belongs to "get_thread"`},
+		{"get_thread", github, `belongs to "get_repository_content"`},
+		{"get_repository_content", "https://example.com/a/b", `use "scrape"`},
+		{"get_thread", "https://example.com/item?id=1", `use "scrape"`},
+		// Look-alikes and non-content pages of the right site are not the platform.
+		{"get_repository_content", "https://github.com/settings/profile", `use "scrape"`},
+		{"get_repository_content", "https://github.com/rockbox37", `use "scrape"`},
+		{"get_repository_content", "https://github.com.evil.example/o/r", `use "scrape"`},
+		{"get_thread", "https://news.ycombinator.com/", `use "scrape"`},
+		{"get_thread", "https://news.ycombinator.com/item?id=abc", `use "scrape"`},
+		{"get_thread", "not a url", `use "scrape"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.tool+" "+tt.url, func(t *testing.T) {
+			got := platformToolError(tt.tool, ClassifyURL(tt.url))
+			if tt.want == "" {
+				if got != "" {
+					t.Fatalf("expected %s to be accepted, got %q", tt.url, got)
+				}
+				return
+			}
+			if !strings.Contains(got, tt.want) {
+				t.Fatalf("error %q should contain %q", got, tt.want)
+			}
+			if !strings.HasPrefix(got, tt.tool+" only accepts ") {
+				t.Fatalf("error %q should name the tool and what it accepts", got)
+			}
+			// (A URL that is itself a prefix of the accepted-shape example is not an echo.)
+			if !strings.Contains(platformTools[tt.tool].accepts, tt.url) && strings.Contains(got, tt.url) {
+				t.Fatalf("error must not echo the submitted URL: %q", got)
+			}
+		})
+	}
+}
+
+func TestMCPPlatformToolsRejectWrongPlatform(t *testing.T) {
+	text, isErr := callPlatformTool(t, "get_repository_content", map[string]interface{}{"url": "https://news.ycombinator.com/item?id=8863"})
+	if !isErr || !strings.Contains(text, `belongs to "get_thread"`) {
+		t.Fatalf("HN URL should be rejected by get_repository_content, naming get_thread: isError=%v %q", isErr, text)
+	}
+	text, isErr = callPlatformTool(t, "get_thread", map[string]interface{}{"url": "https://github.com/rockbox37/cheetah/issues/5"})
+	if !isErr || !strings.Contains(text, `belongs to "get_repository_content"`) {
+		t.Fatalf("GitHub URL should be rejected by get_thread, naming get_repository_content: isError=%v %q", isErr, text)
+	}
+	for _, tool := range []string{"get_repository_content", "get_thread"} {
+		text, isErr = callPlatformTool(t, tool, map[string]interface{}{"url": "https://example.com/page?token=secret"})
+		if !isErr || !strings.Contains(text, `use "scrape"`) {
+			t.Fatalf("%s: other URL should be rejected pointing at scrape: isError=%v %q", tool, isErr, text)
+		}
+		if strings.Contains(text, "secret") || strings.Contains(text, "example.com") {
+			t.Fatalf("%s: error echoed the submitted URL: %q", tool, text)
+		}
+	}
+}
+
+func TestMCPPlatformToolsRequireURL(t *testing.T) {
+	for _, tool := range []string{"get_repository_content", "get_thread"} {
+		for _, args := range []map[string]interface{}{{}, {"url": ""}} {
+			text, isErr := callPlatformTool(t, tool, args)
+			if !isErr || text != "url is required" {
+				t.Fatalf("%s %v: expected \"url is required\", got isError=%v %q", tool, args, isErr, text)
+			}
+		}
+	}
+}
+
+func TestMCPPlatformToolsAcceptRightPlatform(t *testing.T) {
+	// Past the platform check the call proceeds like scrape: it needs DNS and a
+	// queue, so here it may fail at either, but never with the platform error.
+	for tool, url := range map[string]string{
+		"get_repository_content": "https://github.com/rockbox37/cheetah",
+		"get_thread":             "https://news.ycombinator.com/item?id=8863",
+	} {
+		text, _ := callPlatformTool(t, tool, map[string]interface{}{"url": url})
+		if strings.Contains(text, "only accepts") {
+			t.Fatalf("%s rejected a URL of its own platform: %q", tool, text)
+		}
 	}
 }
