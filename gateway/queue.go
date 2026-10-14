@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,6 +29,9 @@ func ownerKey(jobID string) string {
 
 type QueueClient struct {
 	rdb *redis.Client
+	// transcriptLive caches the transcript-worker liveness answer for a few
+	// seconds so each extract_transcript call does not cost Redis round trips.
+	transcriptLive livenessCache
 }
 
 func NewQueueClient(addr string) *QueueClient {
@@ -35,7 +40,91 @@ func NewQueueClient(addr string) *QueueClient {
 		opts = &redis.Options{Addr: addr}
 	}
 	rdb := redis.NewClient(opts)
-	return &QueueClient{rdb: rdb}
+	return &QueueClient{rdb: rdb, transcriptLive: livenessCache{ttl: transcriptLivenessTTL}}
+}
+
+const (
+	// transcriptGroup is the consumer group the transcript worker joins.
+	transcriptGroup = "transcript-workers"
+	// transcriptWorkerMaxIdle is how long a consumer may go without touching the
+	// stream and still count as running. A worker blocked in XREADGROUP (at most
+	// a few seconds per call) keeps its idle time far below this even while
+	// jobs run.
+	transcriptWorkerMaxIdle = 30 * time.Second
+	transcriptLivenessTTL   = 5 * time.Second
+)
+
+// anyFreshConsumer reports whether some consumer has been seen within maxIdle.
+func anyFreshConsumer(consumers []redis.XInfoConsumer, maxIdle time.Duration) bool {
+	for _, c := range consumers {
+		if c.Idle < maxIdle {
+			return true
+		}
+	}
+	return false
+}
+
+// isNoGroupErr matches Redis's answer for a stream or consumer group that does
+// not exist, which for liveness means "no worker has ever joined".
+func isNoGroupErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	return isNoStreamErr(err) || strings.HasPrefix(err.Error(), "NOGROUP")
+}
+
+// livenessCache holds one boolean for ttl. The clock is a parameter so the
+// expiry logic is testable without sleeping.
+type livenessCache struct {
+	mu  sync.Mutex
+	ttl time.Duration
+	ok  bool
+	at  time.Time
+}
+
+func (c *livenessCache) get(now time.Time) (ok, fresh bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.at.IsZero() || now.Sub(c.at) >= c.ttl {
+		return false, false
+	}
+	return c.ok, true
+}
+
+func (c *livenessCache) set(ok bool, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ok, c.at = ok, now
+}
+
+// workerLiveness turns Redis's answer to XINFO CONSUMERS into a verdict. A
+// stream or group that does not exist means no worker has ever joined (not
+// alive, no error). Any other error means Redis could not answer, which is not
+// the same as "no worker": it is returned as an error and must not be cached.
+func workerLiveness(consumers []redis.XInfoConsumer, err error, maxIdle time.Duration) (bool, error) {
+	if err != nil {
+		if isNoGroupErr(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("transcript worker liveness: %w", err)
+	}
+	return anyFreshConsumer(consumers, maxIdle), nil
+}
+
+// TranscriptWorkerAlive reports whether a transcript worker is consuming the
+// transcript stream: the consumer group exists and one of its consumers was
+// seen recently.
+func (q *QueueClient) TranscriptWorkerAlive(ctx context.Context) (bool, error) {
+	if ok, fresh := q.transcriptLive.get(time.Now()); fresh {
+		return ok, nil
+	}
+	consumers, err := q.rdb.XInfoConsumers(ctx, transcriptStream, transcriptGroup).Result()
+	ok, lerr := workerLiveness(consumers, err, transcriptWorkerMaxIdle)
+	if lerr != nil {
+		return false, lerr
+	}
+	q.transcriptLive.set(ok, time.Now())
+	return ok, nil
 }
 
 func (q *QueueClient) Ping(ctx context.Context) error {

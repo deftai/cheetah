@@ -41,6 +41,30 @@ type PageMetadata struct {
 	Strategy string `json:"strategy,omitempty"`
 	// FallbackFrom names a strategy whose extractor failed before the generic fetch produced this result.
 	FallbackFrom string `json:"fallback_from,omitempty"`
+	// Transcript describes how a YouTube transcript was obtained (strategy
+	// youtube_transcript only).
+	Transcript *TranscriptMeta `json:"transcript,omitempty"`
+}
+
+// TranscriptMeta says which caption track a transcript came from, so a caller
+// can tell a creator's captions from auto-generated or machine-translated ones.
+type TranscriptMeta struct {
+	// Kind is "manual", "auto" (YouTube's speech recognition in the original
+	// language) or "translated" (a machine translation of another track).
+	Kind     string `json:"kind"`
+	Language string `json:"language"`
+	// AvailableLanguages lists the caption languages the video offers.
+	AvailableLanguages []string `json:"available_languages,omitempty"`
+}
+
+// JobError says why a job failed, for callers that need more than status
+// "failed". Workers write it next to status "failed"; the code comes from a
+// fixed vocabulary and the message is written by the worker, never taken from
+// third-party text. The transcript worker uses: no_captions,
+// no_track_in_language, rate_limited, blocked, unavailable, timeout, internal.
+type JobError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
 type CrawlRequest struct {
@@ -68,6 +92,8 @@ type JobStatus struct {
 	PagesTotal     int              `json:"pages_total"`
 	PagesCompleted int              `json:"pages_completed"`
 	Results        []ScrapeResponse `json:"results,omitempty"`
+	// Error is set with status "failed" when the worker knows why.
+	Error *JobError `json:"error,omitempty"`
 }
 
 type ExtractRequest struct {
