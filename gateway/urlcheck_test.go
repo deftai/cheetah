@@ -148,7 +148,7 @@ func TestParseSubmittedURL(t *testing.T) {
 		{"query then fragment @", "https://example.com?x#@evil", "example.com"},
 		{"backslash before query", `https://h\?x`, ""},
 		{"backslash before fragment", `https://h\#x`, ""},
-		{"backslash in query",`https://example.com/s?q=a\b`, "example.com"},
+		{"backslash in query", `https://example.com/s?q=a\b`, "example.com"},
 		{"backslash in fragment", `https://example.com/s#a\b`, "example.com"},
 		{"fragment directly after host", "https://example.com#top", ""},
 		{"fragment colon port", "https://github.com#:80@evil.example/", ""},
