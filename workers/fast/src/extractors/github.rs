@@ -15,6 +15,7 @@
 //! branch's file; issue threads show at most the first 100 comments (noted in
 //! the output); PRs show the conversation only, not reviews or the diff.
 
+use super::{ex, fail, one_line};
 use crate::{read_body_capped, Error, FetchConfig, PageResult, Result};
 use chrono::Utc;
 use futures_util::future::BoxFuture;
@@ -93,14 +94,6 @@ pub(super) struct Target {
     owner: String,
     repo: String,
     kind: Kind,
-}
-
-fn ex<E>(msg: &'static str) -> impl FnOnce(E) -> Error {
-    move |_| Error::Extractor(msg.to_string())
-}
-
-fn fail<T>(msg: impl Into<String>) -> Result<T> {
-    Err(Error::Extractor(msg.into()))
 }
 
 fn valid_name(s: &str) -> bool {
@@ -330,11 +323,6 @@ fn login(v: &Value) -> &str {
     v.pointer("/user/login").and_then(Value::as_str).unwrap_or("ghost")
 }
 
-/// A one-line title: GitHub titles are user-controlled and may hold newlines.
-fn one_line(s: &str) -> String {
-    s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
-}
-
 pub(super) fn render_issue(issue: &Value, comments: &Value) -> String {
     let number = issue.get("number").and_then(Value::as_u64).unwrap_or(0);
     let mut out = String::new();
@@ -452,11 +440,9 @@ pub fn extract<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::extractors::test_support::{fake_api, fake_api_with_json};
     use crate::Secret;
     use reqwest::header::{HeaderMap, HeaderValue};
-    use std::sync::{Arc, Mutex};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
 
     fn target(owner: &str, repo: &str, kind: Kind) -> Target {
         Target { owner: owner.into(), repo: repo.into(), kind }
@@ -684,62 +670,6 @@ mod tests {
             ),
             Some(now + 1)
         );
-    }
-
-    type Seen = Arc<Mutex<Vec<String>>>;
-
-    /// Serves canned `(status, body)` replies keyed by request path prefix and
-    /// records each raw request so tests can inspect headers.
-    async fn fake_api(routes: Vec<(&'static str, u16, &'static [u8])>) -> (String, Seen) {
-        fake_api_with_json(routes, &[]).await
-    }
-
-    /// Like `fake_api`, but replies under `json_prefixes` always use the JSON
-    /// content type, as the real contents API does for directories.
-    async fn fake_api_with_json(
-        routes: Vec<(&'static str, u16, &'static [u8])>,
-        json_prefixes: &'static [&'static str],
-    ) -> (String, Seen) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let seen: Seen = Arc::new(Mutex::new(vec![]));
-        let seen2 = seen.clone();
-        tokio::spawn(async move {
-            loop {
-                let (mut sock, _) = match listener.accept().await {
-                    Ok(x) => x,
-                    Err(_) => return,
-                };
-                let routes = routes.clone();
-                let seen = seen2.clone();
-                tokio::spawn(async move {
-                    let mut buf = vec![0u8; 8192];
-                    let n = sock.read(&mut buf).await.unwrap_or(0);
-                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
-                    let path = req.split_whitespace().nth(1).unwrap_or("").to_string();
-                    let wants_raw = req.to_ascii_lowercase().contains("accept: application/vnd.github.raw");
-                    let raw = wants_raw && !json_prefixes.iter().any(|p| path.starts_with(p));
-                    let content_type = if raw {
-                        "application/vnd.github.raw+json; charset=utf-8"
-                    } else {
-                        "application/json; charset=utf-8"
-                    };
-                    seen.lock().unwrap().push(req);
-                    let (status, body) = routes
-                        .iter()
-                        .find(|(p, _, _)| path.starts_with(p))
-                        .map(|(_, s, b)| (*s, *b))
-                        .unwrap_or((404, b"not found"));
-                    let head = format!(
-                        "HTTP/1.1 {status} X\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        body.len()
-                    );
-                    let _ = sock.write_all(head.as_bytes()).await;
-                    let _ = sock.write_all(body).await;
-                });
-            }
-        });
-        (base, seen)
     }
 
     fn cfg() -> FetchConfig {
