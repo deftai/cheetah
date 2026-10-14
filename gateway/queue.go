@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,6 +29,9 @@ func ownerKey(jobID string) string {
 
 type QueueClient struct {
 	rdb *redis.Client
+	// transcriptLive caches the transcript-worker liveness answer for a few
+	// seconds so each extract_transcript call does not cost Redis round trips.
+	transcriptLive livenessCache
 }
 
 func NewQueueClient(addr string) *QueueClient {
@@ -34,8 +39,125 @@ func NewQueueClient(addr string) *QueueClient {
 	if err != nil {
 		opts = &redis.Options{Addr: addr}
 	}
+	// Without this go-redis ignores a context's deadline while waiting for a
+	// reply and uses only its own read timeout (and retries), so a Redis that
+	// accepts a command and stalls would hold a caller far past the deadline
+	// it set (the liveness check's one second, the health endpoint's three).
+	opts.ContextTimeoutEnabled = true
 	rdb := redis.NewClient(opts)
-	return &QueueClient{rdb: rdb}
+	return &QueueClient{rdb: rdb, transcriptLive: livenessCache{ttl: transcriptLivenessTTL}}
+}
+
+const (
+	// transcriptGroup is the consumer group the transcript worker joins.
+	transcriptGroup = "transcript-workers"
+	// transcriptWorkerMaxIdle is how long a consumer may go without touching the
+	// stream and still count as running. This is a REQUIREMENT on the worker, not
+	// something the gateway can make true: it must keep calling XREADGROUP with a
+	// short BLOCK (5 s at most) on a thread that is not busy running a job, so
+	// its idle time stays well below this even while jobs run. A worker that
+	// blocks on a long job, or uses BLOCK 0, is reported as not running.
+	transcriptWorkerMaxIdle = 30 * time.Second
+	transcriptLivenessTTL   = livenessCacheTTL
+	// transcriptLivenessTimeout bounds the Redis call, so a slow Redis cannot
+	// hold a request open (and a slow answer is an error, not "no worker").
+	transcriptLivenessTimeout = time.Second
+)
+
+// countFreshConsumers is the number of consumers seen within maxIdle. The
+// gateway's liveness gate and /v1/health both use it, so they cannot disagree
+// about whether a transcript worker is present.
+func countFreshConsumers(consumers []redis.XInfoConsumer, maxIdle time.Duration) int {
+	n := 0
+	for _, c := range consumers {
+		if c.Idle < maxIdle {
+			n++
+		}
+	}
+	return n
+}
+
+// anyFreshConsumer reports whether some consumer has been seen within maxIdle.
+func anyFreshConsumer(consumers []redis.XInfoConsumer, maxIdle time.Duration) bool {
+	return countFreshConsumers(consumers, maxIdle) > 0
+}
+
+// isNoGroupErr matches Redis's answer for a stream or consumer group that does
+// not exist, which for liveness means "no worker has ever joined".
+func isNoGroupErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	return isNoStreamErr(err) || strings.HasPrefix(err.Error(), "NOGROUP")
+}
+
+// livenessCache holds one boolean for ttl. The clock is a parameter so the
+// expiry logic is testable without sleeping.
+type livenessCache struct {
+	mu  sync.Mutex
+	ttl time.Duration
+	ok  bool
+	at  time.Time
+}
+
+func (c *livenessCache) get(now time.Time) (ok, fresh bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.at.IsZero() || now.Sub(c.at) >= c.ttl {
+		return false, false
+	}
+	return c.ok, true
+}
+
+func (c *livenessCache) set(ok bool, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ok, c.at = ok, now
+}
+
+// workerLiveness turns Redis's answer to XINFO CONSUMERS into a verdict. A
+// stream or group that does not exist means no worker has ever joined (not
+// alive, no error). Any other error means Redis could not answer, which is not
+// the same as "no worker": it is returned as an error and must not be cached.
+func workerLiveness(consumers []redis.XInfoConsumer, err error, maxIdle time.Duration) (bool, error) {
+	if err != nil {
+		if isNoGroupErr(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("transcript worker liveness: %w", err)
+	}
+	return anyFreshConsumer(consumers, maxIdle), nil
+}
+
+// freshTranscriptConsumers counts the transcript group's consumers seen
+// recently, for /v1/health. It applies the same test as the liveness gate.
+func (q *QueueClient) freshTranscriptConsumers(ctx context.Context) (int, error) {
+	consumers, err := q.rdb.XInfoConsumers(ctx, transcriptStream, transcriptGroup).Result()
+	if err != nil {
+		if isNoGroupErr(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return countFreshConsumers(consumers, transcriptWorkerMaxIdle), nil
+}
+
+// TranscriptWorkerAlive reports whether a transcript worker is consuming the
+// transcript stream: the consumer group exists and one of its consumers was
+// seen recently.
+func (q *QueueClient) TranscriptWorkerAlive(ctx context.Context) (bool, error) {
+	if ok, fresh := q.transcriptLive.get(time.Now()); fresh {
+		return ok, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, transcriptLivenessTimeout)
+	defer cancel()
+	consumers, err := q.rdb.XInfoConsumers(ctx, transcriptStream, transcriptGroup).Result()
+	ok, lerr := workerLiveness(consumers, err, transcriptWorkerMaxIdle)
+	if lerr != nil {
+		return false, lerr
+	}
+	q.transcriptLive.set(ok, time.Now())
+	return ok, nil
 }
 
 func (q *QueueClient) Ping(ctx context.Context) error {

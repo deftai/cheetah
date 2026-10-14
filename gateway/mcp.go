@@ -540,6 +540,19 @@ func mcpPlatformTool(c *fiber.Ctx, rpc jsonrpcRequest, params toolCallParams, qu
 	return mcpToolSuccess(c, rpc, map[string]interface{}{"success": true, "job_id": jobID, "strategy": decision.Strategy})
 }
 
+// transcriptWorkerGate is the refusal for a liveness answer, or "" when the job
+// may be queued. An answer that could not be obtained refuses too: queueing
+// blind is exactly the hang this check exists to prevent.
+func transcriptWorkerGate(alive bool, err error) string {
+	switch {
+	case err != nil:
+		return "failed to check the transcript worker"
+	case !alive:
+		return "transcript worker is not running"
+	}
+	return ""
+}
+
 func mcpTranscript(c *fiber.Ctx, rpc jsonrpcRequest, params toolCallParams, queue *QueueClient, enabled bool) error {
 	var args struct {
 		URL      string `json:"url"`
@@ -558,6 +571,16 @@ func mcpTranscript(c *fiber.Ctx, rpc jsonrpcRequest, params toolCallParams, queu
 	// A pure check, so a wrong URL is refused before any DNS lookup or queue access.
 	videoID, msg := transcriptURLError(args.URL)
 	if msg != "" {
+		return mcpToolError(c, rpc, msg)
+	}
+
+	// With no worker consuming the stream a job would sit queued until its
+	// status expired, so say so before doing any more work (DNS included).
+	alive, err := queue.TranscriptWorkerAlive(c.Context())
+	if err != nil {
+		log.Printf("mcp transcript worker check error: %v", err)
+	}
+	if msg := transcriptWorkerGate(alive, err); msg != "" {
 		return mcpToolError(c, rpc, msg)
 	}
 
