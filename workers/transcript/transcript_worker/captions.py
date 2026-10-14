@@ -34,6 +34,13 @@ _LONG_NUMERIC_REF = re.compile(r"&#(?:0*[1-9][0-9]{7,}|[0-9]{65,});?")
 
 @dataclass(frozen=True)
 class Cue:
+    """One caption cue.
+
+    `text` is untrusted plain text, not markup: tags are stripped and entities decoded, so it
+    can still read as HTML or Markdown (`&lt;script&gt;` becomes `<script>`). Nothing here
+    escapes it. Render it only with `render.render_transcript`, which puts it in an inert code
+    fence, or escape it for the target format yourself."""
+
     start: float  # seconds
     text: str  # one line
 
@@ -50,6 +57,8 @@ def parse_vtt(data: bytes, *, rolling_dedupe: bool = False, max_bytes: int = MAX
     line before the new one. `rolling_dedupe` drops lines already shown in the
     previous cue. It is for auto tracks only: in manual captions the same line
     can legitimately follow itself ("No." "No.").
+
+    The cue text is untrusted plain text (see `Cue`); it is not escaped for HTML or Markdown.
 
     Raises TranscriptError(internal) for an oversize, unreadable or empty file.
     """
