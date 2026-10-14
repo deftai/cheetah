@@ -53,7 +53,10 @@ func ValidateScrapeURL(rawURL string) (string, error) {
 	return pinnedIP, nil
 }
 
-// reservedNets are non-public ranges that net.IP's helpers do not cover.
+// reservedNets are non-public ranges that net.IP's helpers do not cover; see
+// the IANA IPv4/IPv6 Special-Purpose Address Registries (RFC 6890, RFC 8190).
+// ISATAP (::5efe:a.b.c.d under any prefix) and operator-specific NAT64
+// prefixes embed IPv4 in forms that cannot be judged from the address alone.
 var reservedNets = mustParseCIDRs(
 	"0.0.0.0/8",       // "this network" (beyond 0.0.0.0 itself)
 	"100.64.0.0/10",   // CGNAT; some clouds expose metadata here
@@ -68,7 +71,10 @@ var reservedNets = mustParseCIDRs(
 	"::ffff:0:0:0/96", // SIIT-translated IPv4
 	"64:ff9b:1::/48",  // local-use NAT64 (RFC 8215)
 	"2001::/32",       // Teredo
+	"2001:2::/48",     // benchmarking
 	"2001:db8::/32",   // documentation
+	"3fff::/20",       // documentation (RFC 9637)
+	"5f00::/16",       // SRv6 SIDs
 	"100::/64",        // discard-only
 	"fec0::/10",       // deprecated site-local
 )
