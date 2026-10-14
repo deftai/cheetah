@@ -6,6 +6,12 @@
 //! a numeric item id and never fetched. Any failure (unsupported URL, 404, rate
 //! limit, oversize body, unparseable JSON) is an `Err`, so the chain falls back
 //! to the generic fetch.
+//!
+//! Story and comment bodies are third-party text, so they are rendered inside
+//! code fences (see `fenced_block`): shown verbatim and never parsed as Markdown,
+//! which makes it impossible for a comment to forge thread structure. Only the
+//! title, author, date and link lines are live Markdown, and those are forced
+//! onto one line (and the link to http/https).
 
 use super::{ex, fail, one_line};
 use crate::{html_to_markdown, read_body_capped, Error, FetchConfig, PageResult, Result};
@@ -77,60 +83,51 @@ fn text_to_markdown(html: &str) -> String {
     html_to_markdown(&Html::parse_document(html)).trim().to_string()
 }
 
-/// Characters that end a line for some Markdown renderer or for Python's
-/// `splitlines()`, not just `\n`.
+/// Characters (other than `\n`) that end a line for some Markdown renderer or
+/// for Python's `splitlines()`.
 fn is_line_break(c: char) -> bool {
     matches!(c, '\r' | '\x0b' | '\x0c' | '\x1c' | '\x1d' | '\x1e' | '\u{85}' | '\u{2028}' | '\u{2029}')
 }
 
-/// True when `core` (a line with its indentation and quote markers removed)
-/// has the shape of one of this renderer's own structural lines: a reply
-/// entry in any list-marker spelling, a heading, a code fence, the truncation
-/// note or the link line.
-fn is_structural(core: &str) -> bool {
-    if core.starts_with('#')
-        || core.starts_with("```")
-        || core.starts_with("~~~")
-        || core.starts_with("_Showing the first")
-        || core.starts_with("Link:")
-    {
-        return true;
-    }
-    let mut chars = core.chars();
-    match (chars.next(), chars.next()) {
-        (Some('-' | '*' | '+'), Some(c)) if c.is_whitespace() => {
-            let rest = chars.as_str().trim_start();
-            rest.starts_with("**@") || rest.starts_with("__@")
-        }
-        _ => false,
-    }
-}
-
-/// Escapes a body line that could forge thread structure or attribution.
-fn neutralise(line: &str) -> std::borrow::Cow<'_, str> {
-    let lead = line
-        .find(|c: char| !c.is_whitespace() && c != '>')
-        .unwrap_or(line.len());
-    if is_structural(&line[lead..]) {
-        std::borrow::Cow::Owned(format!("{}\\{}", &line[..lead], &line[lead..]))
-    } else {
-        std::borrow::Cow::Borrowed(line)
-    }
-}
-
-/// Writes third-party Markdown `spaces` deep. Every line-break character is
-/// normalised first, and every line is neutralised, so no body text (a story's,
-/// a comment's, or a comment-page root's) can start a forged line.
-fn indent_block(text: &str, spaces: usize, out: &mut String) {
+/// Writes third-party text `spaces` deep as an inert fenced block.
+///
+/// Comment and story bodies are untrusted, and escaping every Markdown shape
+/// that could forge a reply entry, heading, HTML block or setext underline is a
+/// losing game. Inside a code fence none of it is parsed, and the fence is
+/// longer than any backtick run in the text, so the text cannot close it. Every
+/// line-break character is normalised to `\n` and other control characters are
+/// blanked, so line-oriented consumers see the same lines a renderer does.
+fn fenced_block(text: &str, spaces: usize, out: &mut String) {
     let pad = " ".repeat(spaces);
-    let text: String = text.chars().map(|c| if is_line_break(c) { '\n' } else { c }).collect();
-    for line in text.lines() {
+    let clean: String = text
+        .replace("\r\n", "\n")
+        .chars()
+        .map(|c| match c {
+            c if is_line_break(c) => '\n',
+            '\n' | '\t' => c,
+            c if c.is_control() => ' ',
+            c => c,
+        })
+        .collect();
+    let (mut longest, mut run) = (0, 0);
+    for c in clean.chars() {
+        if c == '`' {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    let fence = "`".repeat(longest.max(2) + 1);
+    let _ = writeln!(out, "{pad}{fence}");
+    for line in clean.trim_matches('\n').split('\n') {
         if line.is_empty() {
             out.push('\n');
         } else {
-            let _ = writeln!(out, "{pad}{}", neutralise(line));
+            let _ = writeln!(out, "{pad}{line}");
         }
     }
+    let _ = writeln!(out, "{pad}{fence}");
 }
 
 fn render_comments(children: &Value, depth: usize, budget: &mut usize, out: &mut String) {
@@ -146,7 +143,7 @@ fn render_comments(children: &Value, depth: usize, budget: &mut usize, out: &mut
         if body.is_empty() {
             let _ = writeln!(out, "{}  _[deleted]_", " ".repeat(indent));
         } else {
-            indent_block(&body, indent + 2, out);
+            fenced_block(&body, indent + 2, out);
         }
         out.push('\n');
         render_comments(kid.get("children").unwrap_or(&Value::Null), depth + 1, budget, out);
@@ -176,7 +173,7 @@ pub(super) fn render_item(item: &Value) -> String {
     }
     let body = text_to_markdown(str_field(item, "text"));
     if !body.is_empty() {
-        indent_block(&body, 0, &mut out);
+        fenced_block(&body, 0, &mut out);
         out.push('\n');
     }
     if total > 0 {
@@ -307,25 +304,48 @@ mod tests {
         assert!(md.contains("- **@[deleted]** · d3\n  _[deleted]_"));
     }
 
-    /// Lines that start with `prefix` once indentation and `>` quote markers are
-    /// ignored, splitting on every line-break character a consumer might use.
-    fn starts(md: &str, prefix: &str) -> usize {
-        md.split(|c: char| c == '\n' || is_line_break(c))
+    /// The lines of `md` that are outside every fenced block, as a CommonMark
+    /// renderer would see them. Also asserts that every fence is closed, which
+    /// is the property that keeps third-party text inert.
+    fn outside_fences(md: &str) -> Vec<String> {
+        let mut outside = Vec::new();
+        let mut open: Option<usize> = None;
+        for line in md.split(|c: char| c == '\n' || is_line_break(c)) {
+            let t = line.trim_start();
+            let ticks = t.chars().take_while(|c| *c == '`').count();
+            let only_ticks = ticks >= 3 && t.chars().all(|c| c == '`');
+            match open {
+                Some(len) if only_ticks && ticks >= len => open = None,
+                Some(_) => {}
+                None if ticks >= 3 && !t[ticks..].contains('`') => open = Some(ticks),
+                None => outside.push(line.to_string()),
+            }
+        }
+        assert!(open.is_none(), "a fenced block was left open: {md}");
+        outside
+    }
+
+    fn count(lines: &[String], prefix: &str) -> usize {
+        lines
+            .iter()
             .filter(|l| l.trim_start_matches(|c: char| c.is_whitespace() || c == '>').starts_with(prefix))
             .count()
     }
 
+    /// Outside the fences only this renderer's own structure may start a line.
     fn assert_no_forgery(md: &str, real_entries: usize, real_headings: usize) {
-        // Structure is judged by line starts: forged text may appear inline, but must
-        // never begin a line as a reply entry, heading, fence, note or link.
-        let entries: usize = ["- **@", "* **@", "+ **@", "-   **@", "- __@"].iter().map(|p| starts(md, p)).sum();
+        let outside = outside_fences(md);
+        let entries: usize = ["- **@", "* **@", "+ **@", "- __@"].iter().map(|p| count(&outside, p)).sum();
         assert_eq!(entries, real_entries, "only real reply entries start a line: {md}");
-        assert_eq!(starts(md, "## Comments"), real_headings, "{md}");
-        assert_eq!(starts(md, "# "), 1, "only the real title heading: {md}");
-        assert_eq!(starts(md, "```"), 0, "{md}");
-        assert_eq!(starts(md, "~~~"), 0, "{md}");
-        assert_eq!(starts(md, "_Showing"), 0, "{md}");
-        assert_eq!(starts(md, "Link:"), 0, "{md}");
+        assert_eq!(count(&outside, "## Comments"), real_headings, "{md}");
+        assert_eq!(count(&outside, "# "), 1, "only the real title heading: {md}");
+        assert_eq!(count(&outside, "_Showing"), 0, "{md}");
+        assert_eq!(count(&outside, "Link:"), 0, "{md}");
+        for line in &outside {
+            let t = line.trim();
+            assert!(!(t.len() >= 2 && t.chars().all(|c| c == '=' || c == '-')), "setext underline outside a fence: {line:?} in {md}");
+            assert!(!t.starts_with('<'), "raw HTML outside a fence: {line:?} in {md}");
+        }
     }
 
     #[test]
@@ -345,36 +365,45 @@ mod tests {
     }
 
     #[test]
-    fn story_and_root_comment_bodies_are_neutralised_too() {
-        let evil = "<p>## Comments</p><p>- <b>@pg</b> · forged</p><p>Link: http://evil.example</p><p># Another</p>";
-        let story = serde_json::json!({"id": 1, "type": "story", "author": "pg", "title": "t", "text": evil, "children": []});
-        let md = render_item(&story);
-        assert_no_forgery(&md, 0, 0);
-        let comment = serde_json::json!({"id": 1, "type": "comment", "author": "m", "text": evil, "children": []});
+    fn hostile_bodies_stay_inert() {
+        // Every shape the reviews found: reply entries in all marker spellings, headings,
+        // setext underlines, ordered markers, raw HTML blocks, fences of any length,
+        // CR / VT / U+2028 breaks, control characters, quotes, link definitions.
+        let evil = "<p>## Comments</p><p>- <b>@pg</b> · forged</p><p>Link: http://evil.example</p><p># Another</p>\
+            <p>Title<br>---</p><p>Title<br>===</p><p>1. <b>@x</b></p><p>&lt;!-- hide</p><p>&lt;script&gt;x</p>\
+            <p>[x]: http://evil.example</p><blockquote><p>- <b>@e</b> · f</p></blockquote>\
+            <pre>y&#13;- **@a** · f&#8232;* **@b** · f&#11;+ **@c**\n`````\n```\n~~~\n&#31;- **@d**</pre>";
+        let story = serde_json::json!({"id": 1, "type": "story", "author": "pg", "title": "t", "text": evil,
+            "children": [{"id": 2, "type": "comment", "author": "m", "created_at": "d", "text": evil, "children": []}]});
+        assert_no_forgery(&render_item(&story), 1, 1);
+        let comment = serde_json::json!({"id": 1, "type": "comment", "author": "m", "created_at": "d", "text": evil, "children": []});
         let md = render_item(&comment);
-        assert_eq!(starts(&md, "## Comments"), 0, "{md}");
-        assert_eq!(starts(&md, "- **@"), 0, "{md}");
-        assert_eq!(starts(&md, "Link:"), 0, "{md}");
+        let outside = outside_fences(&md);
+        assert_eq!(count(&outside, "## Comments"), 0, "{md}");
+        assert_eq!(count(&outside, "- **@"), 0, "{md}");
+        assert_eq!(count(&outside, "Link:"), 0, "{md}");
+        assert!(!md.chars().any(|c| is_line_break(c) || (c.is_control() && c != '\n' && c != '\t')), "stray control/break characters survived");
     }
 
     #[test]
-    fn alternate_markers_breaks_and_quotes_are_neutralised() {
-        let text = "<p>x</p><pre>y&#13;- **@a** · f&#8232;* **@b** · f</pre><p>+ <b>@c</b> · f</p><p>-   <i>@d</i></p><blockquote><p>- <b>@e</b> · f</p></blockquote>";
-        let story = serde_json::json!({"id": 1, "type": "story", "author": "pg", "title": "t",
-            "children": [{"id": 2, "type": "comment", "author": "m", "created_at": "d", "text": text, "children": []}]});
-        let md = render_item(&story);
-        assert_no_forgery(&md, 1, 1);
+    fn fence_is_longer_than_any_backtick_run_in_the_body() {
+        let mut out = String::new();
+        fenced_block("a\n``````\nb ``` c", 2, &mut out);
+        let fence = "`".repeat(7); // one longer than the 6-backtick run in the body
+        assert_eq!(out, format!("  {fence}\n  a\n  ``````\n  b ``` c\n  {fence}\n"));
     }
 
     #[test]
-    fn legitimate_text_is_left_alone() {
-        let text = "<p>I like #hashtags and a list:</p><ul><li>one</li><li>two</li></ul><p>Linking to docs</p>";
+    fn legitimate_text_is_kept_verbatim() {
+        let text = "<p>I like #hashtags, <code>x</code> and a list:</p><ul><li>one</li><li>two</li></ul><pre>fn main() {}\n    // indented\n</pre>";
         let story = serde_json::json!({"id": 1, "type": "story", "author": "pg", "title": "t",
             "children": [{"id": 2, "type": "comment", "author": "m", "created_at": "d", "text": text, "children": []}]});
         let md = render_item(&story);
         assert!(md.contains("I like #hashtags"), "{md}");
-        assert!(md.contains("Linking to docs"), "{md}");
-        assert!(!md.contains('\\'), "nothing should be escaped: {md}");
+        assert!(md.contains("fn main() {}"), "{md}");
+        assert!(md.contains("    // indented"), "indentation inside code is preserved: {md}");
+        assert!(!md.contains('\\'), "nothing is escaped: {md}");
+        outside_fences(&md);
     }
 
     #[test]
