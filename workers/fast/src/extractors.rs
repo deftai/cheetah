@@ -45,6 +45,19 @@ fn one_line(s: &str) -> String {
         .collect()
 }
 
+/// Backslash-escapes the inline Markdown specials (links, images, HTML, code
+/// spans, emphasis) so third-party text placed in a live line renders as text.
+fn escape_inline(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Extractor registry. Slices that add a platform register it here; an
 /// unregistered strategy is ignored and the page is fetched generically.
 pub fn lookup(strategy: &str) -> Option<ExtractorFn> {
@@ -314,6 +327,4 @@ pub(crate) mod test_support {
         });
         (base, seen)
     }
-
-
 }

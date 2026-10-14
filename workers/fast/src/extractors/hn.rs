@@ -13,7 +13,7 @@
 //! title, author, date and link lines are live Markdown, and those are forced
 //! onto one line (and the link to http/https).
 
-use super::{ex, fail, one_line};
+use super::{escape_inline, ex, fail, one_line};
 use crate::{html_to_markdown, read_body_capped, Error, FetchConfig, PageResult, Result};
 use chrono::Utc;
 use futures_util::future::BoxFuture;
@@ -55,15 +55,16 @@ fn str_field<'a>(v: &'a Value, key: &str) -> &'a str {
     v.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
-/// Third-party fields are written into Markdown, so they are forced onto one
-/// line: a newline could otherwise start a forged heading or reply.
-fn line_field(v: &Value, key: &str) -> String {
-    one_line(str_field(v, key))
+/// A third-party field for a live Markdown line: forced onto one line (a newline
+/// could start a forged heading or reply) and inline-escaped (so it cannot add
+/// a link, HTML or emphasis).
+fn inline_field(v: &Value, key: &str) -> String {
+    escape_inline(&one_line(str_field(v, key)))
 }
 
 fn author(v: &Value) -> String {
     match v.get("author").and_then(Value::as_str) {
-        Some(a) if !a.is_empty() => one_line(a),
+        Some(a) if !a.is_empty() => escape_inline(&one_line(a)),
         _ => "[deleted]".to_string(),
     }
 }
@@ -138,7 +139,7 @@ fn render_comments(children: &Value, depth: usize, budget: &mut usize, out: &mut
         }
         *budget -= 1;
         let indent = 2 * depth.min(MAX_INDENT_DEPTH);
-        let _ = writeln!(out, "{}- **@{}** · {}", " ".repeat(indent), author(kid), line_field(kid, "created_at"));
+        let _ = writeln!(out, "{}- **@{}** · {}", " ".repeat(indent), author(kid), inline_field(kid, "created_at"));
         let body = text_to_markdown(str_field(kid, "text"));
         if body.is_empty() {
             let _ = writeln!(out, "{}  _[deleted]_", " ".repeat(indent));
@@ -156,9 +157,9 @@ pub(super) fn render_item(item: &Value) -> String {
     if is_comment {
         let _ = writeln!(out, "# Comment by @{}\n", author(item));
     } else {
-        let _ = writeln!(out, "# {}\n", one_line(str_field(item, "title")));
+        let _ = writeln!(out, "# {}\n", inline_field(item, "title"));
     }
-    let mut meta = vec![format!("by @{}", author(item)), line_field(item, "created_at")];
+    let mut meta = vec![format!("by @{}", author(item)), inline_field(item, "created_at")];
     if let Some(points) = item.get("points").and_then(Value::as_u64) {
         meta.insert(0, format!("{points} points"));
     }
@@ -167,9 +168,12 @@ pub(super) fn render_item(item: &Value) -> String {
         meta.push(format!("{total} comments"));
     }
     let _ = writeln!(out, "{}\n", meta.join(" · "));
-    let link = line_field(item, "url");
-    if link.starts_with("https://") || link.starts_with("http://") {
-        let _ = writeln!(out, "Link: {link}\n");
+    // A parsed http(s) URL is percent-encoded, so as an autolink it cannot hold
+    // spaces, `<` or `>` and cannot add anything to the line.
+    if let Ok(link) = Url::parse(str_field(item, "url")) {
+        if matches!(link.scheme(), "http" | "https") {
+            let _ = writeln!(out, "Link: <{link}>\n");
+        }
     }
     let body = text_to_markdown(str_field(item, "text"));
     if !body.is_empty() {
@@ -296,7 +300,7 @@ mod tests {
         let md = render_item(&sample());
         assert!(md.starts_with("# Show HN: A thing\n"), "title is one line: {md}");
         assert!(md.contains("42 points · by @pg · 2026-01-01T00:00:00Z · 3 comments"));
-        assert!(md.contains("Link: https://example.com/x"));
+        assert!(md.contains("Link: <https://example.com/x>"));
         assert!(md.contains("Hello **world**"));
         assert!(md.contains("- **@alice** · d1"));
         assert!(md.contains("  Second para"), "multi-paragraph body stays inside the comment: {md}");
@@ -403,6 +407,56 @@ mod tests {
         assert!(md.contains("fn main() {}"), "{md}");
         assert!(md.contains("    // indented"), "indentation inside code is preserved: {md}");
         assert!(!md.contains('\\'), "nothing is escaped: {md}");
+        outside_fences(&md);
+    }
+
+    #[test]
+    fn metadata_lines_cannot_inject_links_or_html() {
+        let item = serde_json::json!({
+            "id": 1, "type": "story", "title": "[Click](http://evil.example) <img src=x> `c` *e*",
+            "author": "a**](http://evil.example)<b>", "created_at": "d<i>",
+            "url": "http://x.example/a b <img src=//e> )",
+            "children": [{"id": 2, "type": "comment", "author": "m**x", "created_at": "[d](u)", "text": "<p>t</p>", "children": []}]
+        });
+        let md = render_item(&item);
+        let outside = outside_fences(&md).join("\n");
+        for live in ["](http", "<img", "<b>", "<i>", "`c`", "*e*"] {
+            let unescaped = outside.match_indices(live).any(|(i, _)| !outside[..i].ends_with('\\'));
+            assert!(!unescaped, "{live:?} is live in a metadata line: {outside}");
+        }
+        let link = outside.lines().find(|l| l.starts_with("Link:")).expect("a parseable http URL is still linked");
+        assert_eq!(link, "Link: <http://x.example/a%20b%20%3Cimg%20src=//e%3E%20)>", "spaces and angle brackets are percent-encoded");
+        assert!(outside.contains("\\[Click\\]"), "title text is kept, escaped: {outside}");
+    }
+
+    #[test]
+    fn link_line_is_a_clean_autolink() {
+        let item = serde_json::json!({"id": 1, "type": "story", "title": "t", "author": "pg",
+            "url": "https://example.com/a(b)?q=1&r=<x>", "children": []});
+        let md = render_item(&item);
+        let line = md.lines().find(|l| l.starts_with("Link:")).expect("link line");
+        assert!(line.starts_with("Link: <https://example.com/") && line.ends_with('>'), "{line}");
+        assert_eq!(line.matches('<').count(), 1, "no extra `<` inside the autolink: {line}");
+        assert_eq!(line.matches('>').count(), 1, "no extra `>` inside the autolink: {line}");
+        assert!(!line["Link: ".len()..].contains(' '), "no spaces inside the autolink: {line}");
+    }
+
+    #[test]
+    fn fenced_bodies_stay_inside_their_list_items() {
+        // Every non-blank line of a body must sit at its entry's content column,
+        // or CommonMark would end the list item and the fence with it.
+        let mut node = serde_json::json!({"id": 99, "type": "comment", "author": "n", "created_at": "d", "text": "<p>body12</p>", "children": []});
+        for d in (0..12).rev() {
+            node = serde_json::json!({"id": d + 2, "type": "comment", "author": "n", "created_at": "d",
+                "text": format!("<p>body{d}</p>"), "children": [node]});
+        }
+        let story = serde_json::json!({"id": 1, "type": "story", "author": "pg", "title": "t", "children": [node]});
+        let md = render_item(&story);
+        for d in 0..=12usize {
+            let line = md.lines().find(|l| l.trim() == format!("body{d}")).unwrap_or_else(|| panic!("body{d} missing: {md}"));
+            let indent = line.len() - line.trim_start().len();
+            assert_eq!(indent, 2 * d.min(MAX_INDENT_DEPTH) + 2, "body{d} indentation");
+        }
         outside_fences(&md);
     }
 
