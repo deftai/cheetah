@@ -45,8 +45,15 @@ struct ResultMetadata<'a> {
 #[derive(Parser, Debug)]
 #[command(name = "cheetah-fast", about = "Fast static page scraper worker")]
 struct Args {
-    #[arg(long, env = "REDIS_URL", default_value = "redis://127.0.0.1:6379")]
-    redis_url: String,
+    /// Holds the password, so it is a `Secret`: trimmed on parse (a stray trailing
+    /// space once made every Redis call fail) and never printed by `{:?}`.
+    #[arg(
+        long,
+        env = "REDIS_URL",
+        default_value = "redis://127.0.0.1:6379",
+        hide_env_values = true
+    )]
+    redis_url: Secret,
 
     #[arg(long, default_value_t = 50)]
     concurrency: usize,
@@ -68,6 +75,16 @@ struct Args {
     github_token: Option<Secret>,
 }
 
+/// The `host:port` of a Redis URL, for logging: everything before the last `@`
+/// in the authority (the user and password) is dropped, and so is any path.
+fn redis_host(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let authority = rest.split('/').next().unwrap_or(rest);
+    authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -81,14 +98,14 @@ async fn main() -> anyhow::Result<()> {
     let consumer_name = format!("worker-{}", uuid::Uuid::new_v4());
 
     info!(
-        redis = %args.redis_url,
+        redis_host = %redis_host(args.redis_url.expose()),
         concurrency = args.concurrency,
         group = %args.group_name,
         consumer = %consumer_name,
         "starting cheetah-fast worker"
     );
 
-    let redis_client = redis::Client::open(args.redis_url.as_str())?;
+    let redis_client = redis::Client::open(args.redis_url.expose())?;
     let mut conn = redis_client.get_multiplexed_async_connection().await?;
 
     let _: Result<(), _> = redis::cmd("XGROUP")
@@ -307,6 +324,41 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redis_host_drops_credentials_and_path() {
+        assert_eq!(
+            redis_host("redis://default:s3cret@h.example:6379"),
+            "h.example:6379"
+        );
+        assert_eq!(
+            redis_host("redis://default:s3cret@h.example:6379/0"),
+            "h.example:6379"
+        );
+        assert_eq!(redis_host("redis://h.example:6379"), "h.example:6379");
+        assert_eq!(redis_host("localhost:6379"), "localhost:6379");
+        // A password containing '@' (unescaped) must still not leak.
+        assert_eq!(
+            redis_host("redis://u:p@ss@h.example:6379"),
+            "h.example:6379"
+        );
+    }
+
+    #[test]
+    fn redis_url_is_trimmed_and_not_debug_printed() {
+        let args = Args::try_parse_from([
+            "cheetah-fast",
+            "--redis-url",
+            "redis://u:pw@h.example:6379 ",
+        ])
+        .expect("args parse");
+        assert_eq!(args.redis_url.expose(), "redis://u:pw@h.example:6379");
+        let dbg = format!("{:?}", args);
+        assert!(
+            !dbg.contains("pw@"),
+            "Debug leaked the redis password: {dbg}"
+        );
+    }
 
     #[test]
     fn result_metadata_reports_strategy() {
