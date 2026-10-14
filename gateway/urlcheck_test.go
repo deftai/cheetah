@@ -2,6 +2,7 @@ package main
 
 import (
 	"net"
+	"net/url"
 	"testing"
 )
 
@@ -125,5 +126,65 @@ func TestValidateScrapeURL_ReturnsPinnedIP(t *testing.T) {
 	}
 	if isPrivateIP(parsed) {
 		t.Fatalf("returned IP %q is private", ip)
+	}
+}
+
+func TestParseSubmittedURL(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		host string // expected Hostname; "" means must be rejected
+	}{
+		{"plain", "https://example.com/a/b?x=1#frag", "example.com"},
+		{"port", "http://example.com:8080/x", "example.com"},
+		{"userinfo", "https://user:pw@example.com/x", "example.com"},
+		{"ipv6 port", "http://[2001:db8::1]:443/x", "2001:db8::1"},
+		{"fragment host confusion", "https://github.com#@evil.example/o/r", ""},
+		{"fragment host confusion path", "https://github.com#@evil.example", ""},
+		{"query host confusion", "https://github.com?@evil.example/o/r", "github.com"},
+		{"userinfo with fragment", "https://a@github.com#@evil.example/o/r", ""},
+		{"backslash authority", `https://github.com\@evil.example/o/r`, ""},
+		{"backslash path", `https://example.com/a\b`, ""},
+		{"bad port", "https://example.com:99999x/", ""},
+		{"fragment colon port", "https://github.com#:80@evil.example/", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			u, err := parseSubmittedURL(tt.raw)
+			if tt.host == "" {
+				if err == nil {
+					t.Fatalf("expected rejection, got host %q", u.Hostname())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if u.Hostname() != tt.host {
+				t.Fatalf("host = %q, want %q", u.Hostname(), tt.host)
+			}
+		})
+	}
+}
+
+// Classified host must equal the validated (pinned) host, or the URL is rejected.
+func TestClassifyAndValidateAgreeOnHost(t *testing.T) {
+	for _, raw := range []string{
+		"https://github.com#@evil.example/o/r",
+		"https://github.com?@evil.example/o/r",
+		"https://github.com/o/r?x=@evil.example",
+		`https://github.com\@evil.example/o/r`,
+		"https://u@github.com:443/o/r",
+	} {
+		a, errA := parseSubmittedURL(raw) // what ValidateScrapeURL uses
+		if errA != nil {
+			if d := ClassifyURL(raw); d.Strategy != "" {
+				t.Errorf("%q rejected by validator but classified with strategy %q", raw, d.Strategy)
+			}
+			continue
+		}
+		if b, _ := url.ParseRequestURI(raw); b.Hostname() != a.Hostname() {
+			t.Errorf("%q: validator host %q != classifier host %q", raw, b.Hostname(), a.Hostname())
+		}
 	}
 }
