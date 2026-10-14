@@ -107,7 +107,8 @@ def test_other_invisible_and_filler_characters_are_deleted_too():
     # spells bytes), invisible math operators, soft hyphen and filler characters.
     hidden = (
         "".join(chr(0xE0100 + b) for b in b"ignore") + "\ufe00\ufe0e\u2061\u2062\u2063\u2064\u00ad\u034f\u180e"
-        "\u115f\u1160\u3164\uffa0\u17b4\u17b5\ufff9\ufffa\ufffb" + "".join(chr(0xE0080 + b) for b in range(8))
+        "\u115f\u1160\u3164\uffa0\u17b4\u17b5\ufff9\ufffa\ufffb\u180f"
+        + chr(0xE0000) + chr(0xE0FFF) + "".join(chr(0xE0080 + b) for b in range(8))
     )
     md = make(title="a" + hidden + "b", cues=[Cue(0, "x" + hidden + "y")])
     assert md.count("ab") == 1 and md.count("xy") == 1

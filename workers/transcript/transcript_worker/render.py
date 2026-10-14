@@ -31,11 +31,12 @@ _BIDI = "\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
 # Characters that render as nothing, or as a blank, but that a consumer reading the text,
 # such as an LLM, can read: zero-width and filler characters, the soft hyphen, invisible
 # math operators, variation selectors (including the supplement, which can spell bytes) and
-# the Unicode tag block (U+E0000-E0FFF, which spells ASCII). They are deleted. ZWJ and ZWNJ
+# the Unicode tag block (U+E0000-E007F, which spells ASCII) and the unassigned rest of
+# U+E0000-E0FFF. They are deleted. ZWJ and ZWNJ
 # (U+200D, U+200C) and U+FE0F (emoji presentation) stay: emoji sequences and several
 # scripts need them.
 _INVISIBLE = (
-    0xAD, 0x34F, 0x115F, 0x1160, 0x17B4, 0x17B5, *range(0x180B, 0x180F), 0x200B, *range(0x2060, 0x2065),
+    0xAD, 0x34F, 0x115F, 0x1160, 0x17B4, 0x17B5, *range(0x180B, 0x1810), 0x200B, *range(0x2060, 0x2065),
     0x3164, *range(0xFE00, 0xFE0F), 0xFEFF, 0xFFA0, *range(0xFFF9, 0xFFFC), *range(0xE0000, 0xE1000),
 )
 _KIND_LABEL = {
