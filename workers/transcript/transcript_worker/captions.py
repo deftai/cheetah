@@ -16,6 +16,9 @@ from . import errors
 
 MAX_CAPTION_BYTES = 5 * 1024 * 1024
 
+# WebVTT allows any number of hour digits. Three (up to 999 hours, far beyond any video) is a
+# deliberate bound: it keeps start times small, and the renderer's size table relies on its
+# `[H:MM:SS]` stamps staying short. A cue timed past 999 hours is skipped like a malformed one.
 _TIMING = re.compile(
     r"(?:(?P<h>\d{1,3}):)?(?P<m>\d{1,2}):(?P<s>\d{2})[.,](?P<ms>\d{3})[ \t]+-->[ \t]+\S"
 )
