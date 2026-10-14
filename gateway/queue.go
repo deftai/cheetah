@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -29,7 +30,22 @@ type QueueClient struct {
 	rdb *redis.Client
 }
 
+// checkRedisURL trims stray whitespace from raw and, when it looks like a URL
+// (contains "://"), requires that it parses. A bare "host:port" is returned
+// as-is. The error never carries the value or the parser's message: both echo
+// the URL, including its password.
+func checkRedisURL(raw string) (string, error) {
+	v := strings.TrimSpace(raw)
+	if strings.Contains(v, "://") {
+		if _, err := redis.ParseURL(v); err != nil {
+			return "", errors.New("not a valid redis URL (check for stray characters or an unescaped character in the password)")
+		}
+	}
+	return v, nil
+}
+
 func NewQueueClient(addr string) *QueueClient {
+	addr = strings.TrimSpace(addr)
 	opts, err := redis.ParseURL(addr)
 	if err != nil {
 		opts = &redis.Options{Addr: addr}
