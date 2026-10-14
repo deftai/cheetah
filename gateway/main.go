@@ -80,7 +80,9 @@ func NewApp(cfg Config, queue *QueueClient, opts ...AppOption) *fiber.App {
 		o(&deps)
 	}
 	app := fiber.New(fiber.Config{
-		AppName:      "Cheetah API Gateway",
+		AppName: "Cheetah API Gateway",
+		// Fly's .internal (6PN) addresses are IPv6-only; Fiber defaults to tcp4.
+		Network:      fiber.NetworkTCP,
 		ErrorHandler: customErrorHandler,
 	})
 
