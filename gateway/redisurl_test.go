@@ -20,6 +20,7 @@ func TestCheckRedisURL(t *testing.T) {
 		{"bare host:port passes through", "localhost:6379", "localhost:6379", false},
 		{"bad port in a url is an error", "redis://default:pw@host.example:notaport", "", true},
 		{"unsupported scheme is an error", "http://default:pw@host.example:6379", "", true},
+		{"credentials without a scheme are an error", "default:pw@host.example:6379", "", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -36,13 +37,18 @@ func TestCheckRedisURL(t *testing.T) {
 
 // The password must never appear in the error: it ends up in the startup log.
 func TestCheckRedisURLErrorDoesNotLeakCredentials(t *testing.T) {
-	_, err := checkRedisURL("redis://default:s3cr3tpassw0rd@host.example:notaport")
-	if err == nil {
-		t.Fatal("expected an error")
-	}
-	for _, leak := range []string{"s3cr3tpassw0rd", "host.example", "default"} {
-		if strings.Contains(err.Error(), leak) {
-			t.Fatalf("error leaks %q: %v", leak, err)
+	for _, in := range []string{
+		"redis://default:s3cr3tpassw0rd@host.example:notaport",
+		"default:s3cr3tpassw0rd@host.example:6379", // no scheme
+	} {
+		_, err := checkRedisURL(in)
+		if err == nil {
+			t.Fatalf("%q: expected an error", in)
+		}
+		for _, leak := range []string{"s3cr3tpassw0rd", "host.example", "default"} {
+			if strings.Contains(err.Error(), leak) {
+				t.Fatalf("%q: error leaks %q: %v", in, leak, err)
+			}
 		}
 	}
 }

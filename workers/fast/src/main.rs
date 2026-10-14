@@ -45,8 +45,8 @@ struct ResultMetadata<'a> {
 #[derive(Parser, Debug)]
 #[command(name = "cheetah-fast", about = "Fast static page scraper worker")]
 struct Args {
-    /// Holds the password, so it is a `Secret`: trimmed on parse (a stray trailing
-    /// space once made every Redis call fail) and never printed by `{:?}`.
+    // Holds the password, so it is a `Secret`: trimmed on parse and never printed
+    // by `{:?}`. A plain comment, not `///`, which clap would show in `--help`.
     #[arg(
         long,
         env = "REDIS_URL",
@@ -75,14 +75,14 @@ struct Args {
     github_token: Option<Secret>,
 }
 
-/// The `host:port` of a Redis URL, for logging: everything before the last `@`
-/// in the authority (the user and password) is dropped, and so is any path.
+/// The `host:port` of a Redis URL, for logging. The user and password are
+/// dropped by taking what follows the LAST `@` in the whole string, before any
+/// path/query/fragment is cut: an unescaped `/`, `?` or `#` in the password must
+/// not end the userinfo early and leave a password prefix in the output.
 fn redis_host(url: &str) -> &str {
     let rest = url.split_once("://").map_or(url, |(_, r)| r);
-    let authority = rest.split('/').next().unwrap_or(rest);
-    authority
-        .rsplit_once('@')
-        .map_or(authority, |(_, host)| host)
+    let hostpart = rest.rsplit_once('@').map_or(rest, |(_, h)| h);
+    hostpart.split(['/', '?', '#']).next().unwrap_or(hostpart)
 }
 
 #[tokio::main]
@@ -337,11 +337,25 @@ mod tests {
         );
         assert_eq!(redis_host("redis://h.example:6379"), "h.example:6379");
         assert_eq!(redis_host("localhost:6379"), "localhost:6379");
-        // A password containing '@' (unescaped) must still not leak.
+        // Unescaped '@', '/', '?' or '#' in the password must not leak a fragment.
         assert_eq!(
             redis_host("redis://u:p@ss@h.example:6379"),
             "h.example:6379"
         );
+        assert_eq!(
+            redis_host("redis://u:pa/ss@h.example:6379"),
+            "h.example:6379"
+        );
+        assert_eq!(
+            redis_host("redis://default:abc/def@h.example:6379/0"),
+            "h.example:6379"
+        );
+        assert_eq!(
+            redis_host("redis://u:p?w#x@h.example:6379"),
+            "h.example:6379"
+        );
+        assert_eq!(redis_host("redis://h.example:6379?x=1"), "h.example:6379");
+        assert_eq!(redis_host("redis://u:p@[::1]:6379"), "[::1]:6379");
     }
 
     #[test]

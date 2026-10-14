@@ -40,6 +40,10 @@ func checkRedisURL(raw string) (string, error) {
 		if _, err := redis.ParseURL(v); err != nil {
 			return "", errors.New("not a valid redis URL (check for stray characters or an unescaped character in the password)")
 		}
+	} else if strings.Contains(v, "@") {
+		// Credentials without a scheme (user:pw@host:6379) would be dialed as a
+		// literal host, and the dial error echoes the whole string.
+		return "", errors.New("not a valid redis address (credentials require a redis:// scheme)")
 	}
 	return v, nil
 }
