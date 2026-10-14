@@ -2,7 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
+	"net/url"
+	"strconv"
+	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -38,6 +44,28 @@ var mcpTools = []mcpTool{
 				"format": {"type": "string", "enum": ["markdown", "html", "text"], "description": "Output format (default: markdown)"},
 				"include_patterns": {"type": "array", "items": {"type": "string"}, "description": "URL patterns to include"},
 				"exclude_patterns": {"type": "array", "items": {"type": "string"}, "description": "URL patterns to exclude"}
+			},
+			"required": ["url"]
+		}`),
+	},
+	{
+		Name:        "get_repository_content",
+		Description: "Get the content of a GitHub repository page as markdown: a repository README, a file (github.com/<owner>/<repo>/blob/<ref>/<path>), or an issue or pull request thread with its comments. Only accepts GitHub URLs; use scrape for other pages.",
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"url": {"type": "string", "description": "A GitHub repository, file, issue or pull request URL"}
+			},
+			"required": ["url"]
+		}`),
+	},
+	{
+		Name:        "get_thread",
+		Description: "Get a Hacker News story or comment thread, with its full comment tree, as markdown. Only accepts Hacker News item URLs (https://news.ycombinator.com/item?id=<id>); use scrape for other pages.",
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"url": {"type": "string", "description": "A Hacker News item URL"}
 			},
 			"required": ["url"]
 		}`),
@@ -195,6 +223,8 @@ func handleMCPToolCall(c *fiber.Ctx, req jsonrpcRequest, queue *QueueClient, aiE
 		return mcpScrape(c, req, params, queue)
 	case "crawl":
 		return mcpCrawl(c, req, params, queue)
+	case "get_repository_content", "get_thread":
+		return mcpPlatformTool(c, req, params, queue)
 	case "extract":
 		return mcpExtract(c, req, params, queue, aiEndpoint)
 	default:
@@ -244,6 +274,245 @@ func mcpScrape(c *fiber.Ctx, rpc jsonrpcRequest, params toolCallParams, queue *Q
 
 	LogRouteDecision(jobID, args.URL, decision)
 	return mcpToolSuccess(c, rpc, map[string]interface{}{"success": true, "job_id": jobID})
+}
+
+// platformTool describes an MCP tool that serves one platform's URLs through
+// that platform's extractor.
+type platformTool struct {
+	strategy string // the router strategy the URL must classify as
+	accepts  string // what the tool accepts, for the error message
+}
+
+var platformTools = map[string]platformTool{
+	"get_repository_content": {
+		strategy: StrategyGitHubRepo,
+		accepts:  "a GitHub repository, file, issue or pull request URL (github.com/<owner>/<repo>[/blob/<ref>/<path> | /issues/<n> | /pull/<n>])",
+	},
+	"get_thread": {
+		strategy: StrategyHNThread,
+		accepts:  "a Hacker News item URL (https://news.ycombinator.com/item?id=<id>)",
+	},
+}
+
+// platformToolOrder fixes the order platformTools is searched in, so error
+// hints are deterministic.
+var platformToolOrder = []string{"get_repository_content", "get_thread"}
+
+func isDigits(s string, maxLen int) bool {
+	if s == "" || len(s) > maxLen {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func validGitHubName(s string) bool {
+	if s == "" || len(s) > 100 || s == "." || s == ".." {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// decodeRefSegment mirrors the worker's `decode_segment` for a blob ref or path
+// segment: percent-decode, then refuse anything that could escape its position
+// (empty, dot segments, separators, control characters, invalid UTF-8).
+func decodeRefSegment(raw string) (string, bool) {
+	dec, err := url.PathUnescape(raw)
+	if err != nil || dec == "" || dec == "." || dec == ".." || !utf8.ValidString(dec) {
+		return "", false
+	}
+	for _, r := range dec {
+		if r == '/' || r == '\\' || unicode.IsControl(r) {
+			return "", false
+		}
+	}
+	return dec, true
+}
+
+// rawSegments splits a still-encoded path into its non-empty segments. The
+// worker parses the raw path (a `%2F` is one segment, not two), so the gateway
+// must too. A segment that is a dot segment in any spelling (`.`, `..`, `%2e`),
+// or a path with a backslash (the worker's URL parser treats it as `/`), is
+// reported as unusable rather than normalised: stricter than the worker, never
+// looser.
+func rawSegments(escapedPath string) ([]string, bool) {
+	if strings.Contains(escapedPath, `\`) {
+		return nil, false
+	}
+	var segs []string
+	for _, p := range strings.Split(escapedPath, "/") {
+		if p == "" {
+			continue
+		}
+		if dec, err := url.PathUnescape(p); err != nil || dec == "." || dec == ".." {
+			return nil, false
+		}
+		segs = append(segs, p)
+	}
+	return segs, true
+}
+
+// rawPathOf returns the path of an https URL exactly as written: everything
+// after the authority up to the first `?` or `#`. Go's `URL.EscapedPath` is not
+// used because it discards the written form (turning `%2F` into `/`) whenever
+// the path holds a character Go would itself escape, such as `|` or non-ASCII.
+func rawPathOf(rawURL string) (string, bool) {
+	const prefix = "https://"
+	if len(rawURL) < len(prefix) || !strings.EqualFold(rawURL[:len(prefix)], prefix) {
+		return "", false
+	}
+	rest := rawURL[len(prefix):]
+	i := strings.IndexAny(rest, "/?#")
+	if i < 0 || rest[i] != '/' {
+		return "", true
+	}
+	path := rest[i:]
+	if j := strings.IndexAny(path, "?#"); j >= 0 {
+		path = path[:j]
+	}
+	return path, true
+}
+
+// platformURLSupported reports whether rawURL is a page the strategy's
+// extractor handles. It mirrors the worker's own URL rules (workers/fast
+// extractors), so a URL the worker would only fall back on is refused here
+// with a clear error instead of being reported as extracted. Where the two
+// could differ it errs on the strict side.
+func platformURLSupported(strategy, rawURL string) bool {
+	// The worker's URL parser strips surrounding whitespace and control
+	// characters (WHATWG), Go's does not, so `.../dir/ ` would be a directory to
+	// the worker but a file name here. A legitimate URL has none, only `%20`.
+	for _, r := range rawURL {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return false
+		}
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme != "https" {
+		return false
+	}
+	if port := u.Port(); port != "" {
+		if n, err := strconv.ParseUint(port, 10, 32); err != nil || n > 65535 {
+			return false
+		}
+	}
+	host := strings.ToLower(u.Hostname())
+	escaped, ok := rawPathOf(rawURL)
+	if !ok {
+		return false
+	}
+	switch strategy {
+	case StrategyGitHubRepo:
+		if host != "github.com" && host != "www.github.com" {
+			return false
+		}
+		segs, ok := rawSegments(escaped)
+		// Owner and repo are never percent-encoded in the worker's rules.
+		if !ok || len(segs) < 2 || !validGitHubName(segs[0]) || !validGitHubName(strings.TrimSuffix(segs[1], ".git")) {
+			return false
+		}
+		rest := segs[2:]
+		switch {
+		case len(rest) == 0:
+			return true
+		case rest[0] == "blob":
+			// /blob/<ref>/<path...>; a trailing slash names a directory.
+			if len(rest) < 3 || strings.HasSuffix(escaped, "/") {
+				return false
+			}
+			for _, seg := range rest[1:] {
+				if _, ok := decodeRefSegment(seg); !ok {
+					return false
+				}
+			}
+			return true
+		case (rest[0] == "issues" || rest[0] == "pull") && len(rest) == 2:
+			_, err := strconv.ParseUint(rest[1], 10, 64)
+			return isDigits(rest[1], 20) && err == nil
+		}
+		return false
+	case StrategyHNThread:
+		if host != "news.ycombinator.com" || escaped != "/item" {
+			return false
+		}
+		q, err := url.ParseQuery(u.RawQuery)
+		if err != nil {
+			return false
+		}
+		ids := q["id"]
+		return len(ids) > 0 && isDigits(ids[0], 10)
+	}
+	return false
+}
+
+// platformToolError returns "" when the URL is one the tool serves, and
+// otherwise a message saying what the tool accepts and where the URL belongs.
+// It never repeats the submitted URL, which may carry credentials in its query.
+func platformToolError(tool, rawURL string, decision RouteDecision) string {
+	spec := platformTools[tool]
+	if decision.Strategy == spec.strategy {
+		if platformURLSupported(spec.strategy, rawURL) {
+			return ""
+		}
+		return fmt.Sprintf("%s only accepts %s; this page type or URL form is not supported, use \"scrape\" for it", tool, spec.accepts)
+	}
+	hint := `use "scrape" for other pages`
+	for _, other := range platformToolOrder {
+		if other != tool && decision.Strategy == platformTools[other].strategy {
+			hint = fmt.Sprintf("this URL belongs to %q", other)
+			break
+		}
+	}
+	return fmt.Sprintf("%s only accepts %s; %s", tool, spec.accepts, hint)
+}
+
+func mcpPlatformTool(c *fiber.Ctx, rpc jsonrpcRequest, params toolCallParams, queue *QueueClient) error {
+	var args struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(params.Arguments, &args); err != nil || args.URL == "" {
+		return mcpToolError(c, rpc, "url is required")
+	}
+
+	// The platform check is a pure classification, so a wrong-platform URL is
+	// refused before any DNS lookup or queue access.
+	decision := ClassifyURL(args.URL)
+	if msg := platformToolError(params.Name, args.URL, decision); msg != "" {
+		return mcpToolError(c, rpc, msg)
+	}
+
+	resolvedIP, err := ValidateScrapeURL(args.URL)
+	if err != nil {
+		return mcpToolError(c, rpc, err.Error())
+	}
+
+	plan, _ := c.Locals("plan").(Plan)
+	if !IsTierAllowed(decision.Tier, plan.AllowedTiers) {
+		return mcpToolError(c, rpc, "this URL requires the "+string(decision.Tier)+" tier, upgrade your plan")
+	}
+
+	// Extractors produce markdown, so the format is fixed; the strategy is the
+	// one the URL already classified as, so the worker runs the right extractor
+	// and falls back to a plain fetch if it cannot.
+	scrapeReq := ScrapeRequest{URL: args.URL, Format: "markdown", ResolvedIP: resolvedIP, Strategy: decision.Strategy}
+	jobID, err := queue.EnqueueScrape(c.Context(), scrapeReq, callerOwner(c), StreamForTier(decision.Tier))
+	if err != nil {
+		log.Printf("mcp enqueue %s error: %v", params.Name, err)
+		return mcpToolError(c, rpc, "failed to enqueue job")
+	}
+
+	LogRouteDecision(jobID, args.URL, decision)
+	return mcpToolSuccess(c, rpc, map[string]interface{}{"success": true, "job_id": jobID, "strategy": decision.Strategy})
 }
 
 func mcpCrawl(c *fiber.Ctx, rpc jsonrpcRequest, params toolCallParams, queue *QueueClient) error {
