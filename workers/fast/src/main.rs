@@ -45,8 +45,15 @@ struct ResultMetadata<'a> {
 #[derive(Parser, Debug)]
 #[command(name = "cheetah-fast", about = "Fast static page scraper worker")]
 struct Args {
-    #[arg(long, env = "REDIS_URL", default_value = "redis://127.0.0.1:6379")]
-    redis_url: String,
+    // Holds the password, so it is a `Secret`: trimmed on parse and never printed
+    // by `{:?}`. A plain comment, not `///`, which clap would show in `--help`.
+    #[arg(
+        long,
+        env = "REDIS_URL",
+        default_value = "redis://127.0.0.1:6379",
+        hide_env_values = true
+    )]
+    redis_url: Secret,
 
     #[arg(long, default_value_t = 50)]
     concurrency: usize,
@@ -68,6 +75,16 @@ struct Args {
     github_token: Option<Secret>,
 }
 
+/// The `host:port` of a Redis URL, for logging. The user and password are
+/// dropped by taking what follows the LAST `@` in the whole string, before any
+/// path/query/fragment is cut: an unescaped `/`, `?` or `#` in the password must
+/// not end the userinfo early and leave a password prefix in the output.
+fn redis_host(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let hostpart = rest.rsplit_once('@').map_or(rest, |(_, h)| h);
+    hostpart.split(['/', '?', '#']).next().unwrap_or(hostpart)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -81,14 +98,14 @@ async fn main() -> anyhow::Result<()> {
     let consumer_name = format!("worker-{}", uuid::Uuid::new_v4());
 
     info!(
-        redis = %args.redis_url,
+        redis_host = %redis_host(args.redis_url.expose()),
         concurrency = args.concurrency,
         group = %args.group_name,
         consumer = %consumer_name,
         "starting cheetah-fast worker"
     );
 
-    let redis_client = redis::Client::open(args.redis_url.as_str())?;
+    let redis_client = redis::Client::open(args.redis_url.expose())?;
     let mut conn = redis_client.get_multiplexed_async_connection().await?;
 
     let _: Result<(), _> = redis::cmd("XGROUP")
@@ -307,6 +324,55 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redis_host_drops_credentials_and_path() {
+        assert_eq!(
+            redis_host("redis://default:s3cret@h.example:6379"),
+            "h.example:6379"
+        );
+        assert_eq!(
+            redis_host("redis://default:s3cret@h.example:6379/0"),
+            "h.example:6379"
+        );
+        assert_eq!(redis_host("redis://h.example:6379"), "h.example:6379");
+        assert_eq!(redis_host("localhost:6379"), "localhost:6379");
+        // Unescaped '@', '/', '?' or '#' in the password must not leak a fragment.
+        assert_eq!(
+            redis_host("redis://u:p@ss@h.example:6379"),
+            "h.example:6379"
+        );
+        assert_eq!(
+            redis_host("redis://u:pa/ss@h.example:6379"),
+            "h.example:6379"
+        );
+        assert_eq!(
+            redis_host("redis://default:abc/def@h.example:6379/0"),
+            "h.example:6379"
+        );
+        assert_eq!(
+            redis_host("redis://u:p?w#x@h.example:6379"),
+            "h.example:6379"
+        );
+        assert_eq!(redis_host("redis://h.example:6379?x=1"), "h.example:6379");
+        assert_eq!(redis_host("redis://u:p@[::1]:6379"), "[::1]:6379");
+    }
+
+    #[test]
+    fn redis_url_is_trimmed_and_not_debug_printed() {
+        let args = Args::try_parse_from([
+            "cheetah-fast",
+            "--redis-url",
+            "redis://u:pw@h.example:6379 ",
+        ])
+        .expect("args parse");
+        assert_eq!(args.redis_url.expose(), "redis://u:pw@h.example:6379");
+        let dbg = format!("{:?}", args);
+        assert!(
+            !dbg.contains("pw@"),
+            "Debug leaked the redis password: {dbg}"
+        );
+    }
 
     #[test]
     fn result_metadata_reports_strategy() {

@@ -34,7 +34,26 @@ type QueueClient struct {
 	transcriptLive livenessCache
 }
 
+// checkRedisURL trims stray whitespace from raw and, when it looks like a URL
+// (contains "://"), requires that it parses. A bare "host:port" is returned
+// as-is. The error never carries the value or the parser's message: both echo
+// the URL, including its password.
+func checkRedisURL(raw string) (string, error) {
+	v := strings.TrimSpace(raw)
+	if strings.Contains(v, "://") {
+		if _, err := redis.ParseURL(v); err != nil {
+			return "", errors.New("not a valid redis URL (check for stray characters or an unescaped character in the password)")
+		}
+	} else if strings.Contains(v, "@") {
+		// Credentials without a scheme (user:pw@host:6379) would be dialed as a
+		// literal host, and the dial error echoes the whole string.
+		return "", errors.New("not a valid redis address (credentials require a redis:// scheme)")
+	}
+	return v, nil
+}
+
 func NewQueueClient(addr string) *QueueClient {
+	addr = strings.TrimSpace(addr)
 	opts, err := redis.ParseURL(addr)
 	if err != nil {
 		opts = &redis.Options{Addr: addr}

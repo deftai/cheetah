@@ -57,8 +57,14 @@ func loadTranscriptWorker() bool {
 
 func LoadConfig() Config {
 	redisURL := os.Getenv("REDIS_URL")
-	if redisURL == "" {
+	if strings.TrimSpace(redisURL) == "" {
 		redisURL = "localhost:6379"
+	}
+	// A malformed URL used to fall back silently to dialing the whole string as a
+	// host, so every request failed with 503 and nothing was logged.
+	redisURL, err := checkRedisURL(redisURL)
+	if err != nil {
+		log.Fatalf("REDIS_URL: %v", err)
 	}
 
 	port := os.Getenv("PORT")
