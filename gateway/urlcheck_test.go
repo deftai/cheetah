@@ -38,7 +38,77 @@ func TestIsPrivateIP(t *testing.T) {
 		{"unspecified v4", "0.0.0.0", true},
 		{"unspecified v6", "::", true},
 
+		// Reserved ranges beyond net.IP's helpers
+		{"this-network 0.1.2.3", "0.1.2.3", true},
+		{"cgnat low", "100.64.0.0", true},
+		{"cgnat metadata", "100.100.100.200", true},
+		{"cgnat high", "100.127.255.255", true},
+		{"ietf 192.0.0.1", "192.0.0.1", true},
+		{"benchmark 198.18.0.1", "198.18.0.1", true},
+		{"benchmark high", "198.19.255.255", true},
+		{"reserved 240.0.0.1", "240.0.0.1", true},
+		{"broadcast", "255.255.255.255", true},
+		{"multicast v4", "224.0.0.1", true},
+		{"multicast v4 global", "239.255.255.250", true},
+		{"multicast v6", "ff02::1", true},
+		{"multicast v6 global", "ff0e::1", true},
+
+		// IPv4-mapped and transition addresses embedding private IPv4
+		{"v4-mapped loopback", "::ffff:127.0.0.1", true},
+		{"v4-mapped metadata", "::ffff:169.254.169.254", true},
+		{"nat64 loopback", "64:ff9b::7f00:1", true},
+		{"nat64 10/8", "64:ff9b::a00:1", true},
+		{"nat64 cgnat", "64:ff9b::6440:1", true},
+		{"6to4 loopback", "2002:7f00:1::1", true},
+		{"6to4 192.168", "2002:c0a8:101::1", true},
+
+		// Other IPv6 forms that alias or embed IPv4, and unroutable ranges
+		{"site-local", "fec0::1", true},
+		{"ipv4-compatible", "::7f00:1", true},
+		{"siit", "::ffff:0:7f00:1", true},
+		{"teredo", "2001:0:4136:e378:8000:63bf:3fff:fdd2", true},
+		{"local-use nat64", "64:ff9b:1::1", true},
+		{"discard", "100::1", true},
+		{"6to4 relay anycast", "192.88.99.1", true},
+		{"doc 192.0.2.1", "192.0.2.1", true},
+		{"doc 198.51.100.1", "198.51.100.1", true},
+		{"doc 203.0.113.1", "203.0.113.1", true},
+		{"doc v6", "2001:db8::1", true},
+		{"6to4 metadata", "2002:a9fe:a9fe::", true},
+		{"nat64 benchmark", "64:ff9b::c612:1", true},
+		{"ietf upper edge", "192.0.0.255", true},
+
 		// Public IPs (should NOT be private)
+		{"public 192.0.1.0", "192.0.1.0", false},
+		{"public google dns v6", "2001:4860:4860::8888", false},
+		{"public 2001:1::1 outside teredo", "2001:1::1", false},
+		{"public above benchmarking v6", "2001:2:1::1", false},
+		{"public above documentation 3fff", "3fff:1000::1", false},
+		{"public below srv6", "5eff::1", false},
+		{"public above srv6", "5f01::1", false},
+		{"public cloudflare v6", "2606:4700::1111", false},
+		{"public 2001:3::1 (outside 2001:2::/48)", "2001:3::1", false},
+		{"public 64:ff9b:2::1", "64:ff9b:2::1", false},
+		{"public 100:0:0:1::1", "100:0:0:1::1", false},
+		{"public 2001:4860::1", "2001:4860::1", false},
+		{"v4-mapped public cgnat-adjacent", "::ffff:100.128.0.1", false},
+		{"v4-mapped cgnat", "::ffff:100.64.0.1", true},
+		{"v4-mapped documentation", "::ffff:192.0.2.1", true},
+		{"benchmarking v6", "2001:2::1", true},
+		{"documentation 3fff", "3fff::1", true},
+		{"srv6", "5f00::1", true},
+		{"siit blocked regardless of embedded v4", "::ffff:0:808:808", true},
+		{"benchmarking v6 upper edge", "2001:2:0:ffff::1", true},
+		{"documentation 3fff upper edge", "3fff:fff:ffff::", true},
+		{"public below cgnat", "100.63.255.255", false},
+		{"public above cgnat", "100.128.0.0", false},
+		{"public below benchmark", "198.17.255.255", false},
+		{"public above benchmark", "198.20.0.0", false},
+		{"public 223.255.255.255", "223.255.255.255", false},
+		{"public 1.0.0.1", "1.0.0.1", false},
+		{"v4-mapped public", "::ffff:8.8.8.8", false},
+		{"nat64 public", "64:ff9b::808:808", false},
+		{"6to4 public", "2002:808:808::1", false},
 		{"public 8.8.8.8", "8.8.8.8", false},
 		{"public 1.1.1.1", "1.1.1.1", false},
 		{"public 172.15.255.255", "172.15.255.255", false},
@@ -59,6 +129,20 @@ func TestIsPrivateIP(t *testing.T) {
 				t.Errorf("isPrivateIP(%s) = %v, want %v", tt.ip, got, tt.private)
 			}
 		})
+	}
+}
+
+func TestIsPrivateIPInvalidFailsClosed(t *testing.T) {
+	for _, ip := range []net.IP{nil, {1, 2, 3}} {
+		if !isPrivateIP(ip) {
+			t.Errorf("isPrivateIP(%v) = false, want true (fail closed)", ip)
+		}
+	}
+	if isPrivateIP(net.IPv4(8, 8, 8, 8).To4()) { // raw 4-byte form
+		t.Error("public 4-byte 8.8.8.8 reported private")
+	}
+	if !isPrivateIP(net.IP{100, 100, 100, 200}) {
+		t.Error("4-byte CGNAT metadata address not blocked")
 	}
 }
 

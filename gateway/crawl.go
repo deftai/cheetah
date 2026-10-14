@@ -50,8 +50,8 @@ func newCrawlHTTPClient() *http.Client {
 			}
 			for _, ipStr := range ips {
 				ip := net.ParseIP(ipStr)
-				if ip != nil && isPrivateIP(ip) {
-					return nil, fmt.Errorf("connection to private IP blocked")
+				if ip == nil || isPrivateIP(ip) {
+					return nil, fmt.Errorf("connection to private or unparseable IP blocked")
 				}
 			}
 			if len(ips) == 0 {
