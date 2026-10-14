@@ -55,27 +55,42 @@ func ValidateScrapeURL(rawURL string) (string, error) {
 
 // reservedNets are non-public ranges that net.IP's helpers do not cover.
 var reservedNets = mustParseCIDRs(
-	"0.0.0.0/8",     // "this network" (beyond 0.0.0.0 itself)
-	"100.64.0.0/10", // CGNAT; some clouds expose metadata here
-	"192.0.0.0/24",  // IETF protocol assignments
-	"198.18.0.0/15", // benchmarking
-	"240.0.0.0/4",   // reserved, includes 255.255.255.255 broadcast
+	"0.0.0.0/8",       // "this network" (beyond 0.0.0.0 itself)
+	"100.64.0.0/10",   // CGNAT; some clouds expose metadata here
+	"192.0.0.0/24",    // IETF protocol assignments
+	"198.18.0.0/15",   // benchmarking
+	"240.0.0.0/4",     // reserved, includes 255.255.255.255 broadcast
+	"192.88.99.0/24",  // 6to4 relay anycast
+	"192.0.2.0/24",    // documentation
+	"198.51.100.0/24", // documentation
+	"203.0.113.0/24",  // documentation
+	"::/96",           // IPv4-compatible ::a.b.c.d (also ::, ::1)
+	"::ffff:0:0:0/96", // SIIT-translated IPv4
+	"64:ff9b:1::/48",  // local-use NAT64 (RFC 8215)
+	"2001::/32",       // Teredo
+	"2001:db8::/32",   // documentation
+	"100::/64",        // discard-only
+	"fec0::/10",       // deprecated site-local
 )
 
 // IPv6 transition ranges that embed an IPv4 address, which is judged instead.
 var (
-	nat64Net = mustParseCIDRs("64:ff9b::/96")[0]
-	sixToNet = mustParseCIDRs("2002::/16")[0]
+	nat64Net = mustParseCIDR("64:ff9b::/96")
+	sixToNet = mustParseCIDR("2002::/16")
 )
+
+func mustParseCIDR(c string) *net.IPNet {
+	_, n, err := net.ParseCIDR(c)
+	if err != nil {
+		panic(err)
+	}
+	return n
+}
 
 func mustParseCIDRs(cidrs ...string) []*net.IPNet {
 	nets := make([]*net.IPNet, 0, len(cidrs))
 	for _, c := range cidrs {
-		_, n, err := net.ParseCIDR(c)
-		if err != nil {
-			panic(err)
-		}
-		nets = append(nets, n)
+		nets = append(nets, mustParseCIDR(c))
 	}
 	return nets
 }

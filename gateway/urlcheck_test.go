@@ -61,7 +61,24 @@ func TestIsPrivateIP(t *testing.T) {
 		{"6to4 loopback", "2002:7f00:1::1", true},
 		{"6to4 192.168", "2002:c0a8:101::1", true},
 
+		// Other IPv6 forms that alias or embed IPv4, and unroutable ranges
+		{"site-local", "fec0::1", true},
+		{"ipv4-compatible", "::7f00:1", true},
+		{"siit", "::ffff:0:7f00:1", true},
+		{"teredo", "2001:0:4136:e378:8000:63bf:3fff:fdd2", true},
+		{"local-use nat64", "64:ff9b:1::1", true},
+		{"discard", "100::1", true},
+		{"6to4 relay anycast", "192.88.99.1", true},
+		{"doc 192.0.2.1", "192.0.2.1", true},
+		{"doc 198.51.100.1", "198.51.100.1", true},
+		{"doc 203.0.113.1", "203.0.113.1", true},
+		{"doc v6", "2001:db8::1", true},
+		{"6to4 metadata", "2002:a9fe:a9fe::", true},
+		{"nat64 benchmark", "64:ff9b::c612:1", true},
+		{"ietf upper edge", "192.0.0.255", true},
+
 		// Public IPs (should NOT be private)
+		{"public 192.0.1.0", "192.0.1.0", false},
 		{"public below cgnat", "100.63.255.255", false},
 		{"public above cgnat", "100.128.0.0", false},
 		{"public below benchmark", "198.17.255.255", false},
@@ -92,6 +109,20 @@ func TestIsPrivateIP(t *testing.T) {
 				t.Errorf("isPrivateIP(%s) = %v, want %v", tt.ip, got, tt.private)
 			}
 		})
+	}
+}
+
+func TestIsPrivateIPInvalidFailsClosed(t *testing.T) {
+	for _, ip := range []net.IP{nil, {1, 2, 3}} {
+		if !isPrivateIP(ip) {
+			t.Errorf("isPrivateIP(%v) = false, want true (fail closed)", ip)
+		}
+	}
+	if isPrivateIP(net.IPv4(8, 8, 8, 8).To4()) { // raw 4-byte form
+		t.Error("public 4-byte 8.8.8.8 reported private")
+	}
+	if !isPrivateIP(net.IP{100, 100, 100, 200}) {
+		t.Error("4-byte CGNAT metadata address not blocked")
 	}
 }
 
