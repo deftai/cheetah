@@ -332,14 +332,14 @@ def test_a_percent_encoded_host_is_not_a_youtube_host():
 
 
 def test_urls_in_yt_dlp_messages_never_reach_the_log(caplog):
-    signed = "https://www.youtube.com/api/timedtext?v=x&signature=SECRETSIG&ip=203.0.113.9"
+    signed = "HTTPS://www.youtube.com/api/timedtext?v=x&signature=SECRETSIG&ip=203.0.113.9"  # any case of scheme
     src = source(extract_error=download_error(f"Max retries exceeded with url: {signed}"))
     with pytest.raises(errors.TranscriptError):
         src.list_tracks(VID)
     assert "SECRETSIG" not in caplog.text and "203.0.113.9" not in caplog.text and "<url>" in caplog.text
 
 
-def test_yt_dlp_is_given_a_silent_logger_so_it_cannot_print_unscrubbed_errors():
+def test_the_silent_logger_swallows_every_level():
     logger = ydl_options("/tmp/w")["logger"]
     for level in ("debug", "info", "warning", "error"):
         getattr(logger, level)("ERROR: https://www.youtube.com/x?signature=SECRETSIG \x1b[31m")  # does nothing, raises nothing

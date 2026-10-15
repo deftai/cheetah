@@ -95,7 +95,7 @@ def ydl_options(work_dir: str) -> dict[str, Any]:
 def _loggable(e: BaseException) -> str:
     """What an operator needs to diagnose a yt-dlp failure: the class and a short, printable message. It
     goes to the log only, never into a result."""
-    text = re.sub(r"https?://\S+", "<url>", str(e))  # signed caption URLs carry short-lived parameters
+    text = _URL.sub("<url>", str(e))  # signed caption URLs carry short-lived parameters
     return f"{type(e).__name__}: {re.sub(r'[^ -~]', '?', text)[:300]}"
 
 
@@ -143,6 +143,7 @@ def classify_error(exc: BaseException) -> errors.TranscriptError:
     return errors.internal("unexpected")
 
 
+_URL = re.compile(r"[a-z][a-z0-9+.-]*://\S+", re.IGNORECASE)
 _HOST = re.compile(r"(?:[a-z0-9][a-z0-9-]*\.)+youtube\.com|youtube\.com")
 
 

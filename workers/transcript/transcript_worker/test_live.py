@@ -1,6 +1,6 @@
 """Runs against real YouTube. Opt in: TRANSCRIPT_LIVE_TEST=1 python -m pytest -m live -v
 
-A few requests for two short public videos, spaced by the worker's own rate limiter. Run it from the
+A few requests for two public videos, spaced by the worker's own rate limiter. Run it from the
 network you intend to deploy to: a pass from a home connection says nothing about a datacenter. Run it
 after every yt-dlp bump; it is what notices YouTube changing under the pin.
 """
