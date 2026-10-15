@@ -256,7 +256,9 @@ class Consumer:
     async def _would_clobber(self, outcome: JobOutcome) -> bool:
         """True when `outcome` is a failure and the job already has a completed result. That happens when a
         run wrote its result but lost the XACK, and the claimed retry then fails (say, rate limited): the
-        caller must keep the transcript it was already given."""
+        caller should keep the transcript it was already given. The check is a GET before the SET, not
+        atomic: it closes the common case (the first run finished long before the retry), not a race
+        where both runs write within microseconds of each other."""
         if outcome.payload is None or outcome.payload.get("status") != "failed":
             return False
         raw = await self._r.get(f"{RESULTS_PREFIX}:{outcome.job_id}")

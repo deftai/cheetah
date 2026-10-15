@@ -618,7 +618,8 @@ def failing_handler(fields):
 
 
 def test_a_retry_that_fails_does_not_overwrite_a_result_that_already_completed():
-    # The first run wrote its result but its XACK was lost; the claimed retry then fails (say, rate limited).
+    # The state after a run that wrote its result but lost its XACK: a result that is already completed
+    # when a failed outcome for the same job arrives (a claimed retry would reach `_process` the same way).
     async def main():
         r = await new_redis()
         await r.set(f"job_results:{job_id(1)}", json.dumps(completed_payload(job_id(1), ENTRY)), ex=3600)
