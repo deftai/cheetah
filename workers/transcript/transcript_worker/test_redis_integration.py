@@ -54,10 +54,13 @@ def with_redis(test):
             r = redis.asyncio.Redis.from_url(URL, protocol=2)
             try:
                 if await r.exists(STREAM):
+                    # Nothing below may touch this Redis: the stream is someone's real queue.
                     pytest.fail(f"refusing to run: {STREAM} already exists in this Redis (use a throwaway one)")
-                await test(r)
+                try:
+                    await test(r)
+                finally:
+                    await r.delete(STREAM, *[f"job_results:{job_id(n)}" for n in range(1, 6)])
             finally:
-                await r.delete(STREAM, *[f"job_results:{job_id(n)}" for n in range(1, 6)])
                 await r.aclose()
 
         asyncio.run(asyncio.wait_for(main(), 60))
