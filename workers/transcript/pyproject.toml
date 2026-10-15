@@ -1,3 +1,29 @@
+[project]
+name = "cheetah-transcript-worker"
+version = "0.1.0"
+description = "YouTube transcript worker for the cheetah web data engine"
+requires-python = ">=3.12.4"
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["transcript_worker"]
+markers = [
+    "live: runs against real YouTube (opt in with TRANSCRIPT_LIVE_TEST=1)",
+    "redis: runs against a real Redis (opt in with TRANSCRIPT_TEST_REDIS_URL)",
+]
+
+[tool.ruff]
+line-length = 130
+target-version = "py312"
+
+[tool.ruff.lint]
+# Explicit, so the result does not move with ruff's default set. The runtime's broad `except Exception`
+# clauses are deliberate (a job or a cache read must never take the worker down), so BLE is not selected.
+select = ["E4", "E7", "E9", "F", "I", "B", "UP", "RUF100"]
+
+[tool.mypy]
+strict = true
+
+[[tool.mypy.overrides]]
+module = ["yt_dlp", "yt_dlp.*"]
+ignore_missing_imports = true

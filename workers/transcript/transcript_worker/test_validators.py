@@ -120,7 +120,7 @@ def test_non_string_values_are_rejected_not_coerced():
         # IPv6 forms that embed or translate to a non-public IPv4 address, and special-purpose ranges that
         # `ipaddress.is_global` accepts on some Python versions.
         "64:ff9b::7f00:1", "64:ff9b::a9fe:a9fe", "64:ff9b::a00:1", "::127.0.0.1", "::8.8.8.8", "::7f00:1",
-        "::a9fe:a9fe", "::ffff:0:7f00:1", "::ffff:8.8.8.8", "fec0::1", "5f00::1", "2002:7f00:1::", "2002:808:808::",
+        "::a9fe:a9fe", "::ffff:0:7f00:1", "::ffff:8.8.8.8", "fec0::1", "5f00::1", "2002:7f00:1::", "2002:a00:1::", "64:ff9b:1::808:808",
         "2001::1", "2001:db8::1", "2001:2::1", "192.88.99.1", "192.0.0.9", "192.0.0.10", "192.31.196.1",
         "192.52.193.1", "192.175.48.1", "198.51.100.7", "203.0.113.9", "198.18.0.1", "240.0.0.1", "255.255.255.255",
         "2607:f8b0:4004:c07::65%eth0",  # a public address with a zone id: only the `%` rule rejects it
@@ -134,7 +134,16 @@ def test_resolved_ip_must_be_a_public_address(ip):
         validate_job(fields(resolved_ip=ip))
 
 
-@pytest.mark.parametrize("ip", ["142.250.80.46", "8.8.8.8", "2607:f8b0:4004:c07::65", "2001:4860:4860::8888"])
+@pytest.mark.parametrize(
+    "ip",
+    [
+        "142.250.80.46", "8.8.8.8", "2607:f8b0:4004:c07::65", "2001:4860:4860::8888",
+        # NAT64 (64:ff9b::/96) and 6to4 (2002::/16) addresses are judged by the IPv4 address they embed,
+        # as the gateway's urlcheck.go does: a DNS64 network hands the gateway such an address for
+        # www.youtube.com and the gateway forwards it.
+        "64:ff9b::808:808", "64:ff9b::8.8.8.8", "2002:808:808::", "2002:808:808::1",
+    ],
+)
 def test_public_resolved_ips_are_accepted(ip):
     assert validate_job(fields(resolved_ip=ip)).resolved_ip == ip
 

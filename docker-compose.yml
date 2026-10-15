@@ -16,6 +16,8 @@ services:
     environment:
       REDIS_URL: "redis://redis:6379"
       PORT: "3000"
+      # Off unless you also start the transcript worker (docker compose --profile transcript up).
+      TRANSCRIPT_WORKER_ENABLED: "${TRANSCRIPT_WORKER_ENABLED:-false}"
     depends_on:
       redis:
         condition: service_healthy
@@ -28,6 +30,35 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+
+  # YouTube transcript worker. Behind a profile, so `docker compose up` does not start it:
+  #   docker compose --profile transcript up -d
+  # and set TRANSCRIPT_WORKER_ENABLED=true for the gateway (see .env.example and
+  # workers/transcript/README.md first: YouTube's Terms restrict automated access, and nothing
+  # here has been run from a datacenter address).
+  transcript-worker:
+    profiles: ["transcript"]
+    build: ./workers/transcript
+    environment:
+      REDIS_URL: "redis://redis:6379"
+      TRANSCRIPT_CACHE_TTL_SECONDS: "${TRANSCRIPT_CACHE_TTL_SECONDS:-86400}"
+      TRANSCRIPT_RATE_INTERVAL_SECONDS: "${TRANSCRIPT_RATE_INTERVAL_SECONDS:-3}"
+      TRANSCRIPT_CONCURRENCY: "${TRANSCRIPT_CONCURRENCY:-2}"
+      TRANSCRIPT_JOB_TIMEOUT_SECONDS: "${TRANSCRIPT_JOB_TIMEOUT_SECONDS:-90}"
+      TRANSCRIPT_MAX_ATTEMPTS: "${TRANSCRIPT_MAX_ATTEMPTS:-3}"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    # A running job may take up to ~2 minutes; the worker finishes it before exiting.
+    stop_grace_period: 2m
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
 
 volumes:
   redis-data:

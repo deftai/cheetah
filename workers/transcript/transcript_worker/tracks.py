@@ -12,6 +12,7 @@ is never preferred over a native one.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -27,6 +28,14 @@ TRANSLATED = "translated"  # a machine translation of another track
 class Track:
     language: str  # validated caption tag, e.g. "en", "pt-BR", "ko-orig"
     kind: str  # MANUAL, AUTO or TRANSLATED; manual tracks live in info["subtitles"], the others in "automatic_captions"
+    # The key yt-dlp lists the track under. It equals `language` except for a second track of one
+    # language, which yt-dlp names "<lang>-<11-character id>" (`en-AbCdEfGhIjK`): `language` is then
+    # the part a caller can ask for, and `key` is what to look the track up by. Only [A-Za-z0-9_-].
+    key: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.key:
+            object.__setattr__(self, "key", self.language)
 
 
 @dataclass(frozen=True)
@@ -78,17 +87,34 @@ def _is_translated(formats: object) -> bool:
     return any(isinstance(f, dict) and "tlang=" in str(f.get("url") or "") for f in formats)
 
 
+# A track key that is no valid tag by itself but is one followed by a variant id.
+_VARIANT_ID = re.compile(r"[A-Za-z0-9_-]{11}")
+
+
+def _language_of_key(key: object) -> str | None:
+    """The language a caller can request for a yt-dlp track key, or None to drop the key."""
+    if valid_request_language(key):
+        assert isinstance(key, str)
+        return key
+    if isinstance(key, str) and len(key) > 12 and key[-12] == "-" and _VARIANT_ID.fullmatch(key[-11:]):
+        base = key[:-12]
+        if valid_request_language(base):
+            return base
+    return None
+
+
 def _collect(group: object, source: str) -> list[Track]:
     out: list[Track] = []
     if not isinstance(group, Mapping):
         return out
-    for lang, formats in group.items():
+    for key, formats in group.items():
         # Only tags a caller could request: "all" and a leading "-" mean something to yt-dlp's
-        # --sub-langs, and `live_chat` and any odd key are dropped.
-        if not valid_request_language(lang) or not isinstance(formats, list) or not formats:
+        # subtitle language list, and `live_chat` and any odd key are dropped.
+        lang = _language_of_key(key)
+        if lang is None or not isinstance(formats, list) or not formats:
             continue
         kind = MANUAL if source == MANUAL else (TRANSLATED if _is_translated(formats) else AUTO)
-        out.append(Track(language=lang, kind=kind))
+        out.append(Track(language=lang, kind=kind, key=key))
     return out
 
 
@@ -112,7 +138,8 @@ def _match(candidates: list[Track], want: str) -> Track | None:
     w = want.casefold()
     exact = [t for t in candidates if t.language.casefold() == w]
     if exact:
-        return exact[0]
+        # A plain track beats a named variant of the same language.
+        return next((t for t in exact if t.key == t.language), exact[0])
     if "-" not in w:
         near = sorted((t for t in candidates if _primary(t.language) == w), key=lambda t: t.language.casefold())
         if near:

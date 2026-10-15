@@ -1,0 +1,10 @@
+# Tests, caches and dev files stay out of the image.
+**/test_*.py
+**/__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+requirements-dev.txt
+pyproject.toml
+README.md

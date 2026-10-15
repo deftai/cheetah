@@ -1,0 +1,5 @@
+-r requirements.txt
+pytest>=8.0
+fakeredis>=2.40
+ruff
+mypy

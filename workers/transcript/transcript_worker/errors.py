@@ -34,15 +34,27 @@ _INTERNAL_MESSAGES = {
 class TranscriptError(Exception):
     """A job failure the worker reports as `{code, message}`."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, *, retry_after: float | None = None) -> None:
         if code not in CODES:
             raise ValueError(f"unknown error code: {code!r}")
         super().__init__(message)
         self.code = code
         self.message = message
+        # Seconds the source asked the caller to wait (a Retry-After header). Worker-internal: it
+        # is never part of the job error.
+        self.retry_after = retry_after
+
+    def __reduce__(self) -> tuple[object, ...]:
+        # Exception pickles through `args` (just the message), which this constructor rejects;
+        # a process pool would otherwise fail to return the error.
+        return (_rebuild, (self.code, self.message, self.retry_after))
 
     def to_job_error(self) -> dict[str, str]:
         return {"code": self.code, "message": self.message}
+
+
+def _rebuild(code: str, message: str, retry_after: float | None) -> TranscriptError:
+    return TranscriptError(code, message, retry_after=retry_after)
 
 
 def no_captions() -> TranscriptError:

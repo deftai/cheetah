@@ -13,6 +13,7 @@ import re
 import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from typing import TypeGuard
 
 STRATEGY = "youtube_transcript"
 MAX_AVAILABLE_LANGUAGES = 100
@@ -25,8 +26,13 @@ _REQUEST_LANGUAGE = re.compile(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8}){0,3}")
 _NOT_VIDEOS = frozenset({"videoseries", "live_stream"})
 # Ranges that `ipaddress.is_global` accepts on some Python versions but that are never a
 # pin target. IPv6 must also sit inside 2000::/3 (global unicast), which already excludes
-# ::/96 (IPv4-compatible), ::ffff:0:0/96 (mapped), 64:ff9b::/96 (NAT64), fec0::/10 and 5f00::/16.
+# ::/96 (IPv4-compatible), ::ffff:0:0/96 (mapped), 64:ff9b:1::/48 (local-use NAT64), fec0::/10 and
+# 5f00::/16. NAT64 (64:ff9b::/96) and 6to4 (2002::/16) are judged by the IPv4 address they embed.
 _GLOBAL_UNICAST_V6 = ipaddress.ip_network("2000::/3")
+# Transition ranges that embed an IPv4 address, which is judged instead (as the gateway's
+# urlcheck.go does): NAT64 (a DNS64 network synthesises these for www.youtube.com) and 6to4.
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+_SIX_TO_FOUR = ipaddress.ip_network("2002::/16")
 _NOT_A_PIN = tuple(
     ipaddress.ip_network(n)
     for n in (
@@ -35,7 +41,6 @@ _NOT_A_PIN = tuple(
         "192.88.99.0/24",  # 6to4 relay anycast
         "2001::/23",  # IETF protocol assignments, Teredo, benchmarking, ORCHID
         "2001:db8::/32",  # documentation
-        "2002::/16",  # 6to4: embeds an IPv4 address
         "3fff::/20",  # documentation (RFC 9637); older is_global tables do not list it
     )
 )
@@ -100,14 +105,21 @@ def clean_languages(tags: Iterable[object], limit: int = MAX_AVAILABLE_LANGUAGES
 def _is_public_pin(addr: ipaddress.IPv4Address | ipaddress.IPv6Address, text: str) -> bool:
     """A public unicast address, decided here rather than by the interpreter's
     `is_global` table alone, which differs between Python releases."""
-    if "%" in text or not addr.is_global or addr.is_multicast:
+    if "%" in text:
+        return False
+    if isinstance(addr, ipaddress.IPv6Address):
+        if addr in _NAT64:
+            return _is_public_pin(ipaddress.IPv4Address(addr.packed[12:]), "")
+        if addr in _SIX_TO_FOUR:
+            return _is_public_pin(ipaddress.IPv4Address(addr.packed[2:6]), "")
+    if not addr.is_global or addr.is_multicast:
         return False
     if isinstance(addr, ipaddress.IPv6Address) and addr not in _GLOBAL_UNICAST_V6:
         return False
     return not any(addr in net for net in _NOT_A_PIN if net.version == addr.version)
 
 
-def _valid_job_id(s: object) -> bool:
+def valid_job_id(s: object) -> TypeGuard[str]:
     if not isinstance(s, str) or len(s) != 36:
         return False
     try:
@@ -116,7 +128,7 @@ def _valid_job_id(s: object) -> bool:
         return False
 
 
-def validate_job(fields: Mapping[object, object]) -> Job:
+def validate_job(fields: Mapping[str, object]) -> Job:
     """Checks a stream entry and returns the job, or raises JobRejected.
 
     Every field must be a `str` (decode before calling). Unknown fields are
@@ -125,7 +137,7 @@ def validate_job(fields: Mapping[object, object]) -> Job:
     (empty means absent) but, when present, must be a public unicast address.
     """
     raw_id = fields.get("job_id")
-    job_id = raw_id if isinstance(raw_id, str) and _valid_job_id(raw_id) else None
+    job_id = raw_id if isinstance(raw_id, str) and valid_job_id(raw_id) else None
 
     def reject(reason: str) -> JobRejected:
         return JobRejected(reason, job_id)

@@ -177,3 +177,64 @@ def test_original_language_hint_for_refused_translations():
     assert tracks_from_info(info(native=["ko-orig"], translated=["en"])).original_language_hint() == "ko-orig"
     assert tracks_from_info(info(manual=["en"], language="en")).original_language_hint() == "en"
     assert TrackListing(tracks=()).original_language_hint() is None
+
+
+# yt-dlp names a second track of one language "<lang>-<11-character id>". An id without a dash
+# (`en-AbCdEfGhIjK`) or with an underscore is no valid tag by itself, so it used to be dropped.
+VARIANT = "en-AbCdEfGhIjK"
+VARIANT_UNDERSCORE = "en-nP7_2PuUl7o"
+
+
+@pytest.mark.parametrize("key", [VARIANT, VARIANT_UNDERSCORE])
+def test_a_named_variant_track_is_listed_under_its_language_and_keeps_its_key(key):
+    (t,) = tracks_from_info(info(manual=[key])).tracks
+    assert (t.language, t.kind, t.key) == ("en", "manual", key)
+
+
+def test_regional_base_languages_work_too():
+    (t,) = tracks_from_info(info(native=["pt-BR-AbCdEfGhIjK"])).tracks
+    assert (t.language, t.kind, t.key) == ("pt-BR", "auto", "pt-BR-AbCdEfGhIjK")
+
+
+def test_a_key_that_is_already_a_valid_tag_stays_as_it_is():
+    # `en-nP7-2PuUl7o` splits into valid subtags, so it is read as a plain tag (the gateway-safe
+    # 14 characters): reported as written, selectable by the primary language.
+    (t,) = tracks_from_info(info(manual=["en-nP7-2PuUl7o"])).tracks
+    assert (t.language, t.key) == ("en-nP7-2PuUl7o", "en-nP7-2PuUl7o")
+    assert pick(info(manual=["en-nP7-2PuUl7o"]), "en").key == "en-nP7-2PuUl7o"
+
+
+def test_plain_tracks_key_is_their_language():
+    (t,) = tracks_from_info(info(manual=["pt-BR"])).tracks
+    assert (t.language, t.key) == ("pt-BR", "pt-BR")
+
+
+def test_a_plain_track_is_preferred_over_a_variant_of_the_same_language():
+    assert pick(info(manual=[VARIANT, "en"]), "en").key == "en"
+    assert pick(info(manual=[VARIANT]), "en").key == VARIANT
+
+
+def test_a_video_whose_only_english_track_is_a_variant_is_not_captionless():
+    sel = select_track(tracks_from_info(info(manual=[VARIANT, "fr"])), "en")
+    assert (sel.track.language, sel.track.key) == ("en", VARIANT)
+    assert sel.available_languages == ("en", "fr")
+    assert sel.transcript_meta()["language"] == "en"
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "en-AbCdEf hIjK",  # a space
+        "en-AbCdEfGhIj",  # 10 characters
+        "en-AbCdEfGhIjKl",  # 12 characters
+        "-AbCdEfGhIjK",  # no language
+        "123-AbCdEfGhIjK",  # not a language
+        "all-AbCdEfGhIjK",  # base "all"
+        "en-\u00e9bCdEfGhIjK",
+        "en-AbCdEfGh/jK",
+        "live_chat",
+    ],
+)
+def test_malformed_variant_keys_are_dropped(key):
+    assert tracks_from_info(info(manual=[key])).tracks == ()
+

@@ -66,7 +66,7 @@ def parse_retry_after(value: object, now_epoch: float | None = None) -> float | 
     else:
         try:
             when = parsedate_to_datetime(v)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):  # an absurd zone offset raises OverflowError
             return None
         if when.tzinfo is None:
             return None
