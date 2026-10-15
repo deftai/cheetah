@@ -63,7 +63,7 @@ A bad value stops the worker at start, naming the variable.
   caption text: `TRANSCRIPT_CACHE_TTL_SECONDS` is also its retention. Keys are `transcript_cache:v1:*`.
   A Redis outage on the cache is a miss, never a failed job.
 - **Redis memory:** an entry can be up to 1 MiB (typically 50-100 KB), and at the default rate one
-  worker can add about 29,000 entries a day, so the cache can grow by gigabytes a day under a diverse
+  worker can add about 14,000 entries a day (two requests to YouTube per new entry), so the cache can grow by gigabytes a day under a diverse
   workload. It shares Redis with the job stream and results. Give that Redis a limit that evicts only
   keys that expire, for example `redis-server --maxmemory 512mb --maxmemory-policy volatile-lru` (the
   stream has no TTL; cache entries and results all have one). Not `allkeys-lru`: it would evict the
@@ -115,7 +115,7 @@ docker run --rm -d --name tw-redis -p 6390:6379 redis:7-alpine
 TRANSCRIPT_TEST_REDIS_URL=redis://127.0.0.1:6390 python -m pytest -m redis -v
 docker stop tw-redis
 
-# Real YouTube (a handful of requests for one short public video). Run it from the network you
+# Real YouTube (a handful of requests for two public videos). Run it from the network you
 # intend to deploy to; a pass at home proves nothing about a datacenter.
 TRANSCRIPT_LIVE_TEST=1 python -m pytest -m live -v
 ```

@@ -52,8 +52,23 @@ _UNAVAILABLE = (
 _TIMEOUT = ("timed out", "timeout")
 
 
+class _SilentLogger:
+    """yt-dlp prints its own `ERROR: ...` line to stderr whatever `quiet` says. That text carries request
+    URLs and YouTube-supplied reasons, so it is swallowed: the DownloadError still reaches `classify_error`
+    and, scrubbed, `_loggable`."""
+
+    def debug(self, msg: object) -> None: ...
+
+    def info(self, msg: object) -> None: ...
+
+    def warning(self, msg: object) -> None: ...
+
+    def error(self, msg: object) -> None: ...
+
+
 def ydl_options(work_dir: str) -> dict[str, Any]:
     return {
+        "logger": _SilentLogger(),
         "quiet": True,
         "no_warnings": True,
         "noprogress": True,
@@ -128,8 +143,12 @@ def classify_error(exc: BaseException) -> errors.TranscriptError:
     return errors.internal("unexpected")
 
 
+_HOST = re.compile(r"(?:[a-z0-9][a-z0-9-]*\.)+youtube\.com|youtube\.com")
+
+
 def _caption_url_ok(url: object) -> bool:
-    if not isinstance(url, str):
+    # Printable ASCII only, and no backslash: HTTP stacks disagree on where the authority ends there.
+    if not isinstance(url, str) or not re.fullmatch(r"[!-~]+", url) or "\\" in url:
         return False
     try:
         parts = urlsplit(url)
@@ -140,7 +159,7 @@ def _caption_url_ok(url: object) -> bool:
             and parts.username is None
             and parts.password is None
             and parts.port in (None, 443)
-            and (host == "youtube.com" or host.endswith(".youtube.com"))
+            and _HOST.fullmatch(host) is not None
         )
     except ValueError:
         return False

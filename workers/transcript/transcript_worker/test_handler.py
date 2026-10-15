@@ -85,3 +85,10 @@ def test_the_outcome_has_a_log_line_without_third_party_text():
     assert VID in out.summary and "completed" in out.summary
     bad = JobHandler(Service(raises=errors.blocked()))(fields())
     assert "blocked" in bad.summary
+
+
+def test_an_unexpected_exceptions_message_never_reaches_the_log(caplog):
+    caplog.set_level("INFO")
+    JobHandler(Service(raises=RuntimeError("https://www.youtube.com/api?signature=SECRETSIG password=hunter2")))(fields())
+    assert "SECRETSIG" not in caplog.text and "hunter2" not in caplog.text
+    assert "RuntimeError" in caplog.text, "the class is still logged, with where it was raised"

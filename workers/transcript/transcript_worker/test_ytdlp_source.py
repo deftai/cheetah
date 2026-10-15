@@ -337,3 +337,34 @@ def test_urls_in_yt_dlp_messages_never_reach_the_log(caplog):
     with pytest.raises(errors.TranscriptError):
         src.list_tracks(VID)
     assert "SECRETSIG" not in caplog.text and "203.0.113.9" not in caplog.text and "<url>" in caplog.text
+
+
+def test_yt_dlp_is_given_a_silent_logger_so_it_cannot_print_unscrubbed_errors():
+    logger = ydl_options("/tmp/w")["logger"]
+    for level in ("debug", "info", "warning", "error"):
+        getattr(logger, level)("ERROR: https://www.youtube.com/x?signature=SECRETSIG \x1b[31m")  # does nothing, raises nothing
+
+
+def test_real_yt_dlp_prints_nothing_for_a_failed_extraction(tmp_path, capfd):
+    opts = {**ydl_options(str(tmp_path)), "proxy": "http://127.0.0.1:1"}  # unreachable: the extraction fails
+    with yt_dlp.YoutubeDL(opts) as ydl, pytest.raises(DownloadError):
+        ydl.extract_info(URL, download=False)
+    out = capfd.readouterr()
+    assert out.err == "" and out.out == ""
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://evil.com\\.youtube.com/x",  # a backslash: some HTTP stacks end the authority there
+        "https://evil.com/.youtube.com",
+        "https://www.youtube.com./x",
+        "https://www.y\u0430utube.com/x",
+        "https://www.youtube.com/x\n",
+        "https://-.youtube.com/x",
+    ],
+)
+def test_odd_hosts_and_characters_are_refused(url):
+    from transcript_worker.ytdlp_source import _caption_url_ok
+
+    assert not _caption_url_ok(url)

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import traceback
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -46,8 +48,11 @@ class JobHandler:
         except errors.TranscriptError as e:
             return JobOutcome(job.job_id, failed_payload(job.job_id, e), f"job={job.job_id} video={job.video_id} failed code={e.code}")
         except Exception as e:
-            # The class name only: the message may carry anything. The traceback is for the operator's log.
-            log.exception("job %s: unexpected %s", job.job_id, type(e).__name__)
+            # The class and where it was raised, never the message: it may carry anything (signed URLs, caption
+            # text, a Redis URL), and the log outlives the cache TTL.
+            frames = traceback.extract_tb(e.__traceback__)
+            where = f"{os.path.basename(frames[-1].filename)}:{frames[-1].lineno}" if frames else "?"
+            log.error("job %s: unexpected %s at %s", job.job_id, type(e).__name__, where)
             err = errors.internal("unexpected")
             return JobOutcome(job.job_id, failed_payload(job.job_id, err), f"job={job.job_id} video={job.video_id} failed code={err.code}")
         kind = entry.transcript["kind"]

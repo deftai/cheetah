@@ -12,15 +12,18 @@ import (
 )
 
 // recorder is a go-redis hook that records every command in order and answers it
-// itself, so no Redis is needed. failXAdd makes XADD return an error.
+// itself, so no Redis is needed. failAdd makes XADD return an error.
 type recorder struct {
 	mu      sync.Mutex
 	cmds    []string
 	failAdd bool
+	deleted []string
 }
 
 func (r *recorder) DialHook(next redis.DialHook) redis.DialHook {
-	return func(ctx context.Context, network, addr string) (net.Conn, error) { return nil, errors.New("no network in this test") }
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return nil, errors.New("no network in this test")
+	}
 }
 
 func (r *recorder) note(c redis.Cmder) error {
@@ -28,6 +31,11 @@ func (r *recorder) note(c redis.Cmder) error {
 	defer r.mu.Unlock()
 	name := strings.ToLower(c.Name())
 	r.cmds = append(r.cmds, name)
+	if name == "del" {
+		for _, a := range c.Args()[1:] {
+			r.deleted = append(r.deleted, a.(string))
+		}
+	}
 	if name == "xadd" && r.failAdd {
 		return errors.New("xadd refused")
 	}
@@ -78,5 +86,11 @@ func TestEnqueueScrapeRemovesTheStatusWhenTheStreamWriteFails(t *testing.T) {
 	got := strings.Join(rec.cmds, ",")
 	if got != "set,set,xadd,del" {
 		t.Fatalf("commands in order = %s, want set,set,xadd,del (a job nothing will process must not read as queued)", got)
+	}
+	if len(rec.deleted) != 2 || !strings.HasPrefix(rec.deleted[0], "job_results:") || !strings.HasPrefix(rec.deleted[1], "job_owner:") {
+		t.Fatalf("deleted keys = %v, want the job status and owner keys", rec.deleted)
+	}
+	if strings.TrimPrefix(rec.deleted[0], "job_results:") != strings.TrimPrefix(rec.deleted[1], "job_owner:") {
+		t.Fatalf("deleted keys belong to different jobs: %v", rec.deleted)
 	}
 }
