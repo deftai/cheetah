@@ -14,7 +14,7 @@ from transcript_worker.cache import CacheEntry
 from transcript_worker.config import GROUP, STREAM, Config
 from transcript_worker.consumer import Consumer
 from transcript_worker.handler import JobOutcome
-from transcript_worker.results import completed_payload
+from transcript_worker.results import completed_payload, failed_payload
 
 VID = "dQw4w9WgXcQ"
 ENTRY = CacheEntry("# T\n", "T", {"kind": "manual", "language": "en", "available_languages": ["en"]})
@@ -610,3 +610,52 @@ def test_the_loop_survives_the_last_running_job_finishing_during_the_busy_poll(c
 
     run(main())
     assert "redis error" not in caplog.text
+
+
+def failing_handler(fields):
+    jid = fields["job_id"]
+    return JobOutcome(jid, failed_payload(jid, errors.timeout()), "failed")
+
+
+def test_a_retry_that_fails_does_not_overwrite_a_result_that_already_completed():
+    # The first run wrote its result but its XACK was lost; the claimed retry then fails (say, rate limited).
+    async def main():
+        r = await new_redis()
+        await r.set(f"job_results:{job_id(1)}", json.dumps(completed_payload(job_id(1), ENTRY)), ex=3600)
+        await add_jobs(r, 1)
+        w = Running(r, failing_handler)
+
+        async def acked():
+            return await pending(r) == 0
+
+        await until(acked)
+        await w.stop()
+        assert (await result(r, 1))["status"] == "completed"
+
+    run(main())
+
+
+def test_a_failure_still_replaces_a_queued_status_and_a_success_replaces_a_failure():
+    async def main():
+        r = await new_redis()
+        await r.set(f"job_results:{job_id(1)}", json.dumps({"job_id": job_id(1), "status": "queued"}), ex=3600)
+        await r.set(f"job_results:{job_id(2)}", json.dumps(failed_payload(job_id(2), errors.blocked())), ex=3600)
+        await add_jobs(r, 1)
+        w = Running(r, failing_handler)
+
+        async def done():
+            return (await result(r, 1) or {}).get("status") == "failed"
+
+        await until(done)
+        await w.stop()
+        assert (await result(r, 1))["error"]["code"] == "timeout"
+        w2 = Running(r, ok_handler)
+        await add_jobs(r, 2)
+
+        async def replaced():
+            return (await result(r, 2) or {}).get("status") == "completed"
+
+        await until(replaced)
+        await w2.stop()
+
+    run(main())

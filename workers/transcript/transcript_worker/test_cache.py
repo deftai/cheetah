@@ -150,3 +150,8 @@ def test_link_points_a_request_at_an_entry_without_renewing_it():
     c.link(VID, "en", TRACK)
     assert c.lookup_requested(VID, "en") == ENTRY
     assert list(store.ttls) == [f"transcript_cache:v1:req:{VID}:en"], "the entry itself keeps its original TTL"
+
+
+def test_null_available_languages_is_a_miss_not_a_crash():
+    raw = json.dumps({"v": 1, "markdown": "# T\n", "title": "T", "transcript": {"kind": "manual", "language": "en", "available_languages": None}})
+    assert CacheEntry.from_bytes(raw.encode()) is None

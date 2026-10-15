@@ -250,3 +250,14 @@ def test_an_oversize_or_unreadable_caption_is_an_internal_error():
 def test_a_huge_title_is_cut_before_it_is_processed():
     out = service(FakeSource(listing(("en", "manual")), title="t" * 10_000_000))[0].run(job("en"))
     assert len(out.title) <= 300 and len(out.markdown) < 5000
+
+
+def test_no_request_starts_when_the_rate_limiter_wait_overshot_the_deadline():
+    src = FakeSource(listing(("en", "manual")))
+    svc, clock = service(src, timeout=10.0)
+    real_sleep = clock.sleep
+    clock.sleep = lambda s: real_sleep(s + 100.0)  # a sleep that runs far longer than asked for
+    svc._sleep = clock.sleep
+    with pytest.raises(errors.TranscriptError) as e:
+        svc.run(job("en"))
+    assert e.value.code == "timeout" and src.list_calls == 0

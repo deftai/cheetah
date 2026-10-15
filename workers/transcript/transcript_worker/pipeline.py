@@ -65,6 +65,8 @@ class TranscriptService:
             if wait is None:
                 raise errors.timeout()
             self._sleep(wait)
+            if self._clock() >= deadline:  # the sleep itself can overshoot
+                raise errors.timeout()
             try:
                 return call()
             except errors.TranscriptError as e:

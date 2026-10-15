@@ -244,7 +244,7 @@ class Consumer:
             err = errors.internal("unexpected")
             outcome = JobOutcome(job_id, failed_payload(job_id, err) if job_id else None, f"job={job_id} failed code={err.code}")
         try:
-            if outcome.payload is not None and outcome.job_id is not None:
+            if outcome.payload is not None and outcome.job_id is not None and not await self._would_clobber(outcome):
                 await self._r.set(f"{RESULTS_PREFIX}:{outcome.job_id}", json.dumps(outcome.payload), ex=RESULT_TTL_SECONDS)
             await self._r.xack(STREAM, GROUP, entry_id)
         except Exception as e:
@@ -252,6 +252,18 @@ class Consumer:
             log.error("could not store the result for %s (%s); the entry stays pending", entry_id, type(e).__name__)
             return
         log.info(outcome.summary)
+
+    async def _would_clobber(self, outcome: JobOutcome) -> bool:
+        """True when `outcome` is a failure and the job already has a completed result. That happens when a
+        run wrote its result but lost the XACK, and the claimed retry then fails (say, rate limited): the
+        caller must keep the transcript it was already given."""
+        if outcome.payload is None or outcome.payload.get("status") != "failed":
+            return False
+        raw = await self._r.get(f"{RESULTS_PREFIX}:{outcome.job_id}")
+        try:
+            return raw is not None and json.loads(raw).get("status") == "completed"
+        except (ValueError, AttributeError):
+            return False
 
     # -- recovery and housekeeping -----------------------------------------------------------------
 
