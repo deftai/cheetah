@@ -542,3 +542,71 @@ def test_a_redis_outage_is_survived():
         await w.stop()
 
     run(main())
+
+
+def test_a_thread_stuck_after_a_timeout_keeps_its_slot_so_later_jobs_are_not_failed_unrun():
+    release = threading.Event()
+    ran = []
+
+    def handler(fields):
+        ran.append(fields["job_id"])
+        if fields["job_id"] == job_id(1):
+            release.wait(10)
+        return ok_handler(fields)
+
+    async def main():
+        r = await new_redis()
+        await add_jobs(r, 1)
+        w = Running(r, handler, config=cfg(concurrency=1, job_timeout=0.05), timeout_grace=0.0)
+
+        async def timed_out():
+            return await result(r, 1) is not None
+
+        await until(timed_out)
+        await add_jobs(r, 2)
+        await asyncio.sleep(0.4)
+        # The only thread is still stuck in job 1: job 2 stays in the stream instead of queueing behind it
+        # and being failed as a timeout without ever having run.
+        assert ran == [job_id(1)] and await result(r, 2) is None
+        assert (await r.xinfo_consumers(STREAM, GROUP))[0]["pending"] == 0
+        release.set()
+
+        async def second_done():
+            return await result(r, 2) is not None
+
+        await until(second_done)
+        await w.stop()
+        assert (await result(r, 2))["status"] == "completed"
+
+    run(main())
+
+
+def test_the_loop_survives_the_last_running_job_finishing_during_the_busy_poll(caplog):
+    async def main():
+        r = await new_redis()
+        real = r.xreadgroup
+
+        async def slow_touch(*a, **k):
+            reply = await real(*a, **k)
+            if k.get("block") is None:  # the busy-slot poll: take long enough for the job to finish meanwhile
+                await asyncio.sleep(0.15)
+            return reply
+
+        r.xreadgroup = slow_touch
+        await add_jobs(r, 1)
+
+        def quick(fields):
+            time.sleep(0.05)
+            return ok_handler(fields)
+
+        w = Running(r, quick, config=cfg(concurrency=1))
+
+        async def done():
+            return await result(r, 1) is not None
+
+        await until(done)
+        await asyncio.sleep(0.4)
+        await w.stop()
+
+    run(main())
+    assert "redis error" not in caplog.text

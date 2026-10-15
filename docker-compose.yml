@@ -54,7 +54,10 @@ services:
     stop_grace_period: 2m
     read_only: true
     tmpfs:
-      - /tmp
+      - /tmp:rw,noexec,nosuid,size=64m
+    mem_limit: 512m
+    pids_limit: 128
+    cpus: 1.0
     cap_drop:
       - ALL
     security_opt:

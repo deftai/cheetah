@@ -45,8 +45,8 @@ class TranscriptError(Exception):
         self.retry_after = retry_after
 
     def __reduce__(self) -> tuple[object, ...]:
-        # Exception pickles through `args` (just the message), which this constructor rejects;
-        # a process pool would otherwise fail to return the error.
+        # Exception pickles (and copies) through `args`, which is just the message and which this
+        # constructor rejects; without this an error would not survive being pickled.
         return (_rebuild, (self.code, self.message, self.retry_after))
 
     def to_job_error(self) -> dict[str, str]:

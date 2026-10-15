@@ -231,16 +231,10 @@ func (q *QueueClient) EnqueueScrape(ctx context.Context, req ScrapeRequest, owne
 		targetStream = stream[0]
 	}
 
-	err = q.rdb.XAdd(ctx, &redis.XAddArgs{
-		Stream: targetStream,
-		MaxLen: streamMaxLen,
-		Approx: true,
-		Values: scrapeStreamValues(jobID, req, string(payload)),
-	}).Err()
-	if err != nil {
-		return "", fmt.Errorf("enqueue scrape job: %w", err)
-	}
-
+	// The queued status and owner are written BEFORE the stream entry. A worker can
+	// finish a job within a few Redis round trips (the transcript worker answers a
+	// cached video without any network fetch), and a "queued" written after the
+	// worker's result would overwrite it, losing the result for the whole status TTL.
 	pipe := q.rdb.Pipeline()
 	pipe.Set(ctx, jobKey(jobID), mustMarshal(JobStatus{
 		JobID:  jobID,
@@ -249,6 +243,21 @@ func (q *QueueClient) EnqueueScrape(ctx context.Context, req ScrapeRequest, owne
 	pipe.Set(ctx, ownerKey(jobID), owner, jobTTL)
 	if _, err = pipe.Exec(ctx); err != nil {
 		return "", fmt.Errorf("set initial job status: %w", err)
+	}
+
+	err = q.rdb.XAdd(ctx, &redis.XAddArgs{
+		Stream: targetStream,
+		MaxLen: streamMaxLen,
+		Approx: true,
+		Values: scrapeStreamValues(jobID, req, string(payload)),
+	}).Err()
+	if err != nil {
+		// Nothing will ever process this job: do not leave a status that reads "queued".
+		// Best effort on a fresh context: the caller's may be the reason XADD failed.
+		cleanup, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		q.rdb.Del(cleanup, jobKey(jobID), ownerKey(jobID))
+		return "", fmt.Errorf("enqueue scrape job: %w", err)
 	}
 
 	return jobID, nil

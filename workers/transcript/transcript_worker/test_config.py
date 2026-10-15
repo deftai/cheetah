@@ -91,3 +91,14 @@ def test_an_explicit_consumer_name_must_be_safe():
 def test_a_bare_host_and_port_gets_a_scheme_for_the_client():
     assert load({"REDIS_URL": "redis:6379"}).client_url == "redis://redis:6379"
     assert load({"REDIS_URL": "rediss://h:6380/1"}).client_url == "rediss://h:6380/1"
+
+
+@pytest.mark.parametrize("url", ["us:p\u2105w@host:6379", "user:pw@host:99999999", "host:6379/x y"])
+def test_a_schemeless_url_is_checked_too_and_never_echoed(url):
+    with pytest.raises(ConfigError) as e:
+        load({"REDIS_URL": url})
+    assert "p\u2105w" not in str(e.value) and "REDIS_URL" in str(e.value)
+
+
+def test_repr_does_not_show_the_redis_url():
+    assert "s3cret" not in repr(load({"REDIS_URL": "redis://:s3cret@h:6379"}))

@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 # Fixed by the gateway (queue.go, youtube.go): the worker has to match them, so they are not settings.
@@ -34,7 +34,7 @@ class ConfigError(Exception):
 
 @dataclass(frozen=True)
 class Config:
-    redis_url: str
+    redis_url: str = field(repr=False)  # may hold a password
     consumer_name: str
     concurrency: int = 2
     job_timeout: float = 90.0  # seconds one job may take, retries included
@@ -66,10 +66,9 @@ class Config:
             return v
 
         redis_url = get("REDIS_URL") or "redis://127.0.0.1:6379"
-        if "://" in redis_url:
-            # Without this a stray space or an absurd port surfaces later as a connection error that
-            # quotes the URL, password included.
-            _check_redis_url(redis_url)
+        # Without this a stray space or an absurd port surfaces later as a connection error that quotes
+        # the URL, password included. A bare host:port is checked the way the client will read it.
+        _check_redis_url(redis_url if "://" in redis_url else "redis://" + redis_url)
 
         name = get("TRANSCRIPT_CONSUMER_NAME")
         if name is None:

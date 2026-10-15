@@ -62,6 +62,15 @@ A bad value stops the worker at start, naming the variable.
   all, and two requests that resolve to the same track share one entry. The cache holds third-party
   caption text: `TRANSCRIPT_CACHE_TTL_SECONDS` is also its retention. Keys are `transcript_cache:v1:*`.
   A Redis outage on the cache is a miss, never a failed job.
+- **Redis memory:** an entry can be up to 1 MiB (typically 50-100 KB), and at the default rate one
+  worker can add about 29,000 entries a day, so the cache can grow by gigabytes a day under a diverse
+  workload. It shares Redis with the job stream and results. Give that Redis a limit that evicts only
+  keys that expire, for example `redis-server --maxmemory 512mb --maxmemory-policy volatile-lru` (the
+  stream has no TTL; cache entries and results all have one). Not `allkeys-lru`: it would evict the
+  stream. The compose file does not set this for you.
+- **Erasing cached text** (a takedown or an erasure request): the cache is plain Redis keys, and the
+  text is also in Redis's snapshot or append-only files until they are rewritten:
+  `redis-cli --scan --pattern 'transcript_cache:v1:*:<video_id>:*' | xargs redis-cli del`.
 - **Rate limiting:** one token bucket per worker process (burst 1). Every request to YouTube (the
   track listing, the caption download) takes a token. yt-dlp's own retries are off; the worker
   retries rate-limited and timed-out requests with jittered backoff, never sooner than a
@@ -77,10 +86,12 @@ A bad value stops the worker at start, naming the variable.
 ### Known limits
 
 - A job that hangs inside yt-dlp cannot be killed (it is a thread). The caller still gets a
-  `timeout` result, but the thread stays busy; with every thread stuck, new jobs time out until the
+  `timeout` result, and the stuck thread keeps its slot: the worker stops taking jobs for it (they
+  wait in the stream) until the thread returns, and with every thread stuck it takes none until the
   container restarts. yt-dlp's socket timeout (20 s) bounds each network step, which makes this
   unlikely, not impossible.
-- **Egress is not restricted by the worker.** `resolved_ip` pins `www.youtube.com` only; yt-dlp also
+- **Egress is not restricted by the worker, and `resolved_ip` is not used.** The worker validates the
+  gateway's `resolved_ip` but yt-dlp does its own DNS, so nothing pins `www.youtube.com`. yt-dlp also
   contacts other Google hosts and follows redirects. Caption URLs are checked to be `https` on
   `youtube.com`, but the deployment still needs its own egress policy (network policy or firewall)
   if the worker runs next to anything private.
@@ -92,7 +103,7 @@ A bad value stops the worker at start, naming the variable.
 ```bash
 pip install -r requirements-dev.txt
 python -m pytest                      # offline; Redis is faked (fakeredis)
-ruff check . && mypy --strict transcript_worker/*.py   # mypy: the non-test modules
+ruff check . && mypy transcript_worker   # strict, non-test modules
 ```
 
 Two opt-in suites run against the real thing; both are skipped unless you ask:

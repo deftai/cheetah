@@ -40,7 +40,7 @@ def test_translated_refusal_points_at_the_original_language():
     assert "original language instead" in errors.rate_limited(translated=True, original_language=None).message
 
 
-def test_errors_survive_pickling_for_a_process_pool():
+def test_errors_survive_pickling():
     import pickle
 
     e = pickle.loads(pickle.dumps(errors.TranscriptError("rate_limited", "slow down", retry_after=7.5)))

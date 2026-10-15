@@ -321,3 +321,19 @@ def test_a_percent_sign_in_the_work_dir_is_not_a_template_field():
     o = ydl_options("/tmp/a%(id)s/b")
     assert o["outtmpl"]["default"] == "/tmp/a%%(id)s/b/%(id)s.%(ext)s"
     assert o["paths"]["temp"] == "/tmp/a%(id)s/b"
+
+
+def test_a_percent_encoded_host_is_not_a_youtube_host():
+    evil = {**INFO, "subtitles": {"en": [{"ext": "vtt", "url": "https://evil.com%40www.youtube.com/api/timedtext"}]}, "automatic_captions": {}}
+    src = source(info=evil)
+    info = src.list_tracks(VID)
+    with pytest.raises(errors.TranscriptError):
+        src.fetch_captions(info, Track("en", "manual"))
+
+
+def test_urls_in_yt_dlp_messages_never_reach_the_log(caplog):
+    signed = "https://www.youtube.com/api/timedtext?v=x&signature=SECRETSIG&ip=203.0.113.9"
+    src = source(extract_error=download_error(f"Max retries exceeded with url: {signed}"))
+    with pytest.raises(errors.TranscriptError):
+        src.list_tracks(VID)
+    assert "SECRETSIG" not in caplog.text and "203.0.113.9" not in caplog.text and "<url>" in caplog.text

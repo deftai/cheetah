@@ -26,7 +26,7 @@ import json
 import logging
 import time
 from collections.abc import Callable, Mapping
-from concurrent.futures import Executor
+from concurrent.futures import Executor, Future
 from typing import Any
 
 import redis.exceptions
@@ -39,7 +39,7 @@ from .validators import valid_job_id
 
 log = logging.getLogger(__name__)
 
-BLOCK_MS = 2000  # the gateway treats a consumer idle for 30 s as gone; the plan caps BLOCK at 5 s
+BLOCK_MS = 2000  # gateway/queue.go: BLOCK must stay at 5 s or less (a consumer idle for 30 s counts as gone)
 CLAIM_EVERY = 30.0
 SWEEP_EVERY = 60.0
 STALE_CONSUMER_IDLE_MS = 10 * 60 * 1000
@@ -118,10 +118,16 @@ class Consumer:
         self._retry_backoff = retry_backoff
         self._clock = clock
         self._inflight: dict[str, asyncio.Task[None]] = {}
+        # Executor futures of jobs given up on after the worker's own time limit. The thread cannot be
+        # stopped, so it keeps its slot until it returns: a new job must not queue behind it.
+        self._abandoned: set[Future[JobOutcome]] = set()
 
     @property
     def inflight_count(self) -> int:
         return len(self._inflight)
+
+    def _free_slots(self) -> int:
+        return self._cfg.concurrency - len(self._inflight) - len(self._abandoned)
 
     # -- Redis plumbing ------------------------------------------------------------------------
 
@@ -162,13 +168,17 @@ class Consumer:
                 if now - last_sweep >= self._sweep_every:
                     last_sweep = now
                     await self._sweep_stale_consumers()
-                free = self._cfg.concurrency - len(self._inflight)
+                free = self._free_slots()
                 if free > 0:
                     for entry_id, fields in await self._read_new(free):
                         self._start_job(entry_id, fields)
                 else:
                     await self._touch()
-                    await asyncio.wait(list(self._inflight.values()), timeout=self._block_ms / 1000, return_when=asyncio.FIRST_COMPLETED)
+                    running = list(self._inflight.values())  # may have emptied during the poll
+                    if running:
+                        await asyncio.wait(running, timeout=self._block_ms / 1000, return_when=asyncio.FIRST_COMPLETED)
+                    else:
+                        await asyncio.sleep(self._block_ms / 1000)  # only abandoned threads hold the slots
                 failures = 0
             except asyncio.CancelledError:
                 raise
@@ -217,13 +227,14 @@ class Consumer:
 
     async def _process(self, entry_id: str, fields: dict[str, str]) -> None:
         job_id = fields.get("job_id") if valid_job_id(fields.get("job_id")) else None
+        thread_job = self._executor.submit(self._handler, fields)
         try:
-            outcome = await asyncio.wait_for(
-                asyncio.get_running_loop().run_in_executor(self._executor, self._handler, fields),
-                self._cfg.job_timeout + self._timeout_grace,
-            )
+            outcome = await asyncio.wait_for(asyncio.wrap_future(thread_job), self._cfg.job_timeout + self._timeout_grace)
         except TimeoutError:
-            # The thread cannot be stopped; the caller still gets an answer.
+            # The thread cannot be stopped; the caller still gets an answer, and the thread keeps its slot.
+            if not thread_job.cancel():
+                self._abandoned.add(thread_job)
+                thread_job.add_done_callback(self._abandoned.discard)
             err = errors.timeout()
             outcome = JobOutcome(job_id, failed_payload(job_id, err) if job_id else None, f"job={job_id} failed code={err.code} (worker limit)")
         except asyncio.CancelledError:
@@ -247,7 +258,7 @@ class Consumer:
     async def _claim_pending(self) -> None:
         cursor = "0-0"
         for _ in range(MAX_CLAIM_PAGES):
-            free = self._cfg.concurrency - len(self._inflight)
+            free = self._free_slots()
             if free <= 0:
                 return
             reply = await self._r.xautoclaim(
@@ -291,7 +302,7 @@ class Consumer:
         for c in await self._consumers():
             if c["name"] != self._cfg.consumer_name and c["pending"] == 0 and c["idle"] >= self._stale_idle_ms:
                 await self._r.xgroup_delconsumer(STREAM, GROUP, c["name"])
-                log.info("deleted stale consumer %s", c["name"])
+                log.info("deleted stale consumer %r", c["name"])  # a Redis-side name: repr keeps it to one line
 
     async def _drain(self) -> None:
         if self._inflight:

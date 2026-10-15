@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import logging
 import re
-import socket
 import tempfile
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import AbstractContextManager
@@ -40,7 +39,6 @@ log = logging.getLogger(__name__)
 SOCKET_TIMEOUT = 20
 _READ_PIECE = 64 * 1024
 _MAX_CHAIN = 8
-_HOSTS = ("youtube.com", ".youtube.com")
 
 # Phrases in yt-dlp's (English) messages. They only pick a code; none is ever echoed.
 _BLOCKED = ("not a bot", "unusual traffic", "captcha")
@@ -82,7 +80,8 @@ def ydl_options(work_dir: str) -> dict[str, Any]:
 def _loggable(e: BaseException) -> str:
     """What an operator needs to diagnose a yt-dlp failure: the class and a short, printable message. It
     goes to the log only, never into a result."""
-    return f"{type(e).__name__}: {re.sub(r'[^ -~]', '?', str(e))[:300]}"
+    text = re.sub(r"https?://\S+", "<url>", str(e))  # signed caption URLs carry short-lived parameters
+    return f"{type(e).__name__}: {re.sub(r'[^ -~]', '?', text)[:300]}"
 
 
 def _chain(exc: BaseException) -> Iterator[BaseException]:
@@ -122,7 +121,7 @@ def classify_error(exc: BaseException) -> errors.TranscriptError:
         return errors.unavailable()
     if (
         statuses & {408, 504}
-        or any(isinstance(e, (TimeoutError, socket.timeout)) for e in chain)
+        or any(isinstance(e, TimeoutError) for e in chain)
         or any(m in text for m in _TIMEOUT)
     ):
         return errors.timeout()
@@ -137,6 +136,7 @@ def _caption_url_ok(url: object) -> bool:
         host = (parts.hostname or "").lower()
         return (
             parts.scheme == "https"
+            and "%" not in parts.netloc  # a percent-encoded host is decoded later by the HTTP stack
             and parts.username is None
             and parts.password is None
             and parts.port in (None, 443)

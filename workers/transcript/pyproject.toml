@@ -23,6 +23,8 @@ select = ["E4", "E7", "E9", "F", "I", "B", "UP", "RUF100"]
 
 [tool.mypy]
 strict = true
+# The colocated tests are not type-annotated.
+exclude = 'test_.*\.py$'
 
 [[tool.mypy.overrides]]
 module = ["yt_dlp", "yt_dlp.*"]

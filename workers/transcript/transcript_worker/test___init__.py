@@ -21,18 +21,6 @@ def test_every_core_module_imports_cleanly_and_has_a_docstring():
         assert module.__doc__, f"{name} has no module docstring"
 
 
-def test_core_modules_import_no_io_libraries():
-    for name in CORE:
-        tree = ast.parse((Path(transcript_worker.__path__[0]) / f"{name}.py").read_text(encoding="utf-8"))
-        imported = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                imported |= {a.name.split(".")[0] for a in node.names}
-            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-                imported.add(node.module.split(".")[0])
-        assert not imported & FORBIDDEN, f"{name} imports {imported & FORBIDDEN}"
-
-
 def _imports(name):
     tree = ast.parse((Path(transcript_worker.__path__[0]) / f"{name}.py").read_text(encoding="utf-8"))
     found = set()
@@ -42,6 +30,12 @@ def _imports(name):
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
             found.add(node.module.split(".")[0])
     return found
+
+
+def test_core_modules_import_no_io_libraries():
+    for name in CORE:
+        imported = _imports(name)
+        assert not imported & FORBIDDEN, f"{name} imports {imported & FORBIDDEN}"
 
 
 def test_every_module_is_classified_so_a_new_one_has_to_pick_a_layer():
