@@ -660,3 +660,27 @@ def test_a_failure_still_replaces_a_queued_status_and_a_success_replaces_a_failu
         await w2.stop()
 
     run(main())
+
+
+def test_giving_up_on_an_entry_does_not_replace_a_result_that_already_completed():
+    # A job that succeeded but whose XACK kept failing reaches the delivery limit: the caller keeps the transcript.
+    async def main():
+        r = await new_redis()
+        await r.set(f"job_results:{job_id(1)}", json.dumps(completed_payload(job_id(1), ENTRY)), ex=3600)
+        await add_jobs(r, 1)
+        await r.xgroup_create(STREAM, GROUP, id="0", mkstream=True)
+        await r.xreadgroup(GROUP, "dead-0", {STREAM: ">"}, count=1)
+        mid = (await r.xpending_range(STREAM, GROUP, "-", "+", 1))[0]["message_id"]
+        for i in (1, 2):
+            await r.xclaim(STREAM, GROUP, f"dead-{i}", 0, [mid])
+        called = []
+        w = Running(r, lambda f: called.append(1) or ok_handler(f), claim_idle_ms=0, max_deliveries=3)
+
+        async def acked():
+            return await pending(r) == 0
+
+        await until(acked)
+        await w.stop()
+        assert called == [] and (await result(r, 1))["status"] == "completed"
+
+    run(main())

@@ -244,7 +244,9 @@ class Consumer:
             err = errors.internal("unexpected")
             outcome = JobOutcome(job_id, failed_payload(job_id, err) if job_id else None, f"job={job_id} failed code={err.code}")
         try:
-            if outcome.payload is not None and outcome.job_id is not None and not await self._would_clobber(outcome):
+            if outcome.payload is not None and outcome.job_id is not None and not (
+                outcome.payload.get("status") == "failed" and await self._already_completed(outcome.job_id)
+            ):
                 await self._r.set(f"{RESULTS_PREFIX}:{outcome.job_id}", json.dumps(outcome.payload), ex=RESULT_TTL_SECONDS)
             await self._r.xack(STREAM, GROUP, entry_id)
         except Exception as e:
@@ -253,15 +255,13 @@ class Consumer:
             return
         log.info(outcome.summary)
 
-    async def _would_clobber(self, outcome: JobOutcome) -> bool:
-        """True when `outcome` is a failure and the job already has a completed result. That happens when a
-        run wrote its result but lost the XACK, and the claimed retry then fails (say, rate limited): the
-        caller should keep the transcript it was already given. The check is a GET before the SET, not
-        atomic: it closes the common case (the first run finished long before the retry), not a race
-        where both runs write within microseconds of each other."""
-        if outcome.payload is None or outcome.payload.get("status") != "failed":
-            return False
-        raw = await self._r.get(f"{RESULTS_PREFIX}:{outcome.job_id}")
+    async def _already_completed(self, job_id: str) -> bool:
+        """True when the job already has a completed result. That happens when a run wrote its result but
+        lost the XACK; a failure written later (a claimed retry that fails, say rate limited, or giving up
+        on an entry delivered too often) must not replace the transcript the caller was already given. The
+        check is a GET before the SET, not atomic: it closes the common case (the first run finished long
+        before), not a race where both runs write within microseconds of each other."""
+        raw = await self._r.get(f"{RESULTS_PREFIX}:{job_id}")
         try:
             return raw is not None and json.loads(raw).get("status") == "completed"
         except (ValueError, AttributeError):
@@ -299,7 +299,7 @@ class Consumer:
         """An entry delivered too often keeps killing its worker: fail it instead of running it again."""
         job_id = fields.get("job_id")
         log.error("entry %s was delivered more than %d times; failing it", entry_id, self._max_deliveries)
-        if valid_job_id(job_id):
+        if valid_job_id(job_id) and not await self._already_completed(job_id):
             err = errors.internal("unexpected")
             await self._r.set(f"{RESULTS_PREFIX}:{job_id}", json.dumps(failed_payload(job_id, err)), ex=RESULT_TTL_SECONDS)
         await self._r.xack(STREAM, GROUP, entry_id)
