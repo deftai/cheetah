@@ -38,3 +38,18 @@ def test_translated_refusal_points_at_the_original_language():
     assert "request the original language (ko-orig)" in m
     assert "original language" not in errors.rate_limited(translated=False, original_language="ko").message
     assert "original language instead" in errors.rate_limited(translated=True, original_language=None).message
+
+
+def test_errors_survive_pickling():
+    import pickle
+
+    e = pickle.loads(pickle.dumps(errors.TranscriptError("rate_limited", "slow down", retry_after=7.5)))
+    assert isinstance(e, errors.TranscriptError)
+    assert (e.code, e.message, e.retry_after) == ("rate_limited", "slow down", 7.5)
+    assert errors.no_captions().retry_after is None
+    assert pickle.loads(pickle.dumps(errors.blocked())).to_job_error() == errors.blocked().to_job_error()
+
+
+def test_retry_after_is_not_part_of_the_job_error():
+    e = errors.TranscriptError("rate_limited", "slow down", retry_after=7.5)
+    assert e.to_job_error() == {"code": "rate_limited", "message": "slow down"}

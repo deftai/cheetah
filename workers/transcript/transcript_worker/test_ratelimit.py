@@ -104,3 +104,16 @@ def test_backoff_honours_retry_after():
     assert backoff_delay(0, retry_after=30, jitter=lambda: 0.5) == 30
     assert backoff_delay(0, retry_after=0.1, jitter=lambda: 0.5) == 2.0
     assert backoff_delay(0, retry_after=MAX_RETRY_AFTER, jitter=lambda: 0.5) == MAX_RETRY_AFTER
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "Mon, 01 Jan 2026 00:00:00 +99999999999999999999",
+        "Mon, 01 Jan 2026 00:00:00 -99999999999999",
+        "1 Jan 2026 00:00:00 +9999999999999999999999999",
+    ],
+)
+def test_retry_after_dates_that_overflow_are_unreadable_not_fatal(bad):
+    # email.utils raises OverflowError (not ValueError) for an absurd zone offset.
+    assert parse_retry_after(bad, now_epoch=1792567700.0) is None
