@@ -50,6 +50,47 @@ func TestExtractLinks(t *testing.T) {
 	}
 }
 
+// Only http(s) links may come out of extractLinks. A blocklist of schemes (javascript:,
+// mailto:, tel:) misses data:, vbscript:, mixed-case spellings and anything else, so the
+// check is an allowlist on the resolved URL.
+func TestExtractLinksKeepsOnlyHTTPLinks(t *testing.T) {
+	htmlContent := `<html><body>
+		<a href="/ok">relative</a>
+		<a href="//cdn.example.com/p">protocol-relative</a>
+		<a href="HTTPS://example.com/upper">upper-case scheme</a>
+		<a href="http://example.com/plain">http</a>
+		<a href="data:text/html,&lt;script&gt;alert(1)&lt;/script&gt;">data</a>
+		<a href="vbscript:msgbox(1)">vbscript</a>
+		<a href="JavaScript:alert(1)">mixed-case javascript</a>
+		<a href=" javascript:alert(1)">leading space</a>
+		<a href="java&#9;script:alert(1)">tab inside</a>
+		<a href="ftp://example.com/file">ftp</a>
+		<a href="file:///etc/passwd">file</a>
+		<a href="mailto:a@b.c">mail</a>
+		<a href="tel:+15550100">tel</a>
+		<a href="blob:https://example.com/uuid">blob</a>
+		<a href="ws://example.com/socket">ws</a>
+	</body></html>`
+
+	want := map[string]bool{
+		"https://example.com/ok":    true,
+		"https://cdn.example.com/p": true,
+		"https://example.com/upper": true,
+		"http://example.com/plain":  true,
+	}
+
+	links := extractLinks(htmlContent, "https://example.com/start")
+	for _, link := range links {
+		if !want[link] {
+			t.Errorf("link %q should have been dropped", link)
+		}
+		delete(want, link)
+	}
+	for link := range want {
+		t.Errorf("expected link %q was dropped", link)
+	}
+}
+
 func TestExtractLinksRelative(t *testing.T) {
 	htmlContent := `<html><body>
 		<a href="sub/page">Relative</a>

@@ -263,12 +263,18 @@ func extractLinks(htmlContent string, baseURL string) []string {
 				continue
 			}
 			href := strings.TrimSpace(attr.Val)
-			if href == "" || strings.HasPrefix(href, "#") || strings.HasPrefix(href, "javascript:") || strings.HasPrefix(href, "mailto:") || strings.HasPrefix(href, "tel:") {
+			if href == "" || strings.HasPrefix(href, "#") {
 				continue
 			}
 
 			resolved, err := base.Parse(href)
 			if err != nil {
+				continue
+			}
+			// Allowlist, not a blocklist of schemes: javascript:, data:, vbscript:, mailto:, tel:,
+			// ftp:, file:, blob: and whatever comes next are all dropped. url.Parse has already
+			// lower-cased the scheme, so mixed-case spellings cannot slip past.
+			if resolved.Scheme != "http" && resolved.Scheme != "https" {
 				continue
 			}
 
