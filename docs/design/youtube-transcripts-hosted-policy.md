@@ -39,10 +39,13 @@ Keeping this true:
 A hosted tool that never contacts YouTube: the caller brings the text, the service formats it.
 
 Phase A, caption files. A tool such as `format_transcript` accepts a WebVTT caption file (SRT would
-need its own parser) that the user obtained themselves, and returns the same Markdown the worker
-produces: timestamped lines inside a code fence that no backtick run in the text can close, size
-capped at 1 MiB. `parse_vtt` and `render_transcript` in the worker's core are pure functions and are
-reused as they are. No network, no cache by video id (there is no id), no worker consumer. Open
+need its own parser) that the user obtained themselves, and returns Markdown in the same shape the
+worker produces: timestamped lines inside a code fence that no backtick run in the text can close,
+size capped at 1 MiB. `parse_vtt` is pure and can be reused unchanged. `render_transcript` is pure
+too but is not reusable as it stands: it requires a valid video id, track kind and language, and
+always writes a `Video: <youtube url>` line. It would need a variant for files without those (no
+video line, an optional label in place of the track description), keeping the fence and sanitising
+code shared. No network, no cache by video id (there is no id), no worker consumer. Open
 questions: the upload shape (the API today takes JSON, so a size limit and encoding decide between
 inline text and a multipart upload), whether to accept a video title as a plain string, and how long
 anything is retained (the answer should be "not at all").
