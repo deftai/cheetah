@@ -18,6 +18,10 @@ shows the `extract_transcript` tool only when `TRANSCRIPT_WORKER_ENABLED=true`.
 - **There is no fallback.** A job that cannot produce a transcript fails with an error code and a
   message; it is never re-routed to a plain page scrape.
 
+The hosted service does not run this worker. The reasoning, the guardrails that keep it that way and
+the alternative being considered are in
+[`docs/design/youtube-transcripts-hosted-policy.md`](../../docs/design/youtube-transcripts-hosted-policy.md).
+
 ## Run it
 
 ```bash
