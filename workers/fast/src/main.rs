@@ -1,10 +1,12 @@
 use cheetah_fast::extractors::{self, generic_fetch};
 use cheetah_fast::{FetchConfig, Secret};
 use clap::Parser;
+use redis::aio::{ConnectionManager, ConnectionManagerConfig};
 use reqwest::Client;
 use serde::Serialize;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::signal;
 use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
@@ -85,6 +87,22 @@ fn redis_host(url: &str) -> &str {
     hostpart.split(['/', '?', '#']).next().unwrap_or(hostpart)
 }
 
+/// Opens the worker's Redis connection as a `ConnectionManager`, which replaces a
+/// dropped connection by itself. A plain multiplexed connection does not: once
+/// Redis restarts, fails over, or the socket is cut, every later command on it
+/// fails with "broken pipe" until the process restarts, and nothing here would
+/// notice. Clones share the one healing connection, so in-flight tasks recover too.
+///
+/// `XREADGROUP` blocks for up to 2 s, so the response timeout leaves ample
+/// headroom; it only exists to bound a half-open socket that never answers.
+async fn connect_redis(url: &str) -> redis::RedisResult<ConnectionManager> {
+    let client = redis::Client::open(url)?;
+    let config = ConnectionManagerConfig::new()
+        .set_connection_timeout(Duration::from_secs(5))
+        .set_response_timeout(Duration::from_secs(10));
+    ConnectionManager::new_with_config(client, config).await
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -105,8 +123,7 @@ async fn main() -> anyhow::Result<()> {
         "starting cheetah-fast worker"
     );
 
-    let redis_client = redis::Client::open(args.redis_url.expose())?;
-    let mut conn = redis_client.get_multiplexed_async_connection().await?;
+    let mut conn = connect_redis(args.redis_url.expose()).await?;
 
     let _: Result<(), _> = redis::cmd("XGROUP")
         .arg("CREATE")
@@ -324,6 +341,103 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpSocket};
+    use tokio::sync::watch;
+
+    /// Binds with SO_REUSEADDR so the same port can be taken again right after the
+    /// previous listener (and its TIME_WAIT sockets) closed.
+    fn bind(addr: std::net::SocketAddr) -> TcpListener {
+        let sock = TcpSocket::new_v4().expect("socket");
+        sock.set_reuseaddr(true).expect("reuseaddr");
+        sock.bind(addr).expect("bind");
+        sock.listen(16).expect("listen")
+    }
+
+    /// Stands in for Redis: answers every command with +PONG. Sending on the
+    /// returned channel closes the listener and every open connection, which is
+    /// what a Redis restart or failover looks like to a client. Needs no server.
+    fn fake_redis(listener: TcpListener) -> watch::Sender<()> {
+        let (stop_tx, stop_rx) = watch::channel(());
+        tokio::spawn(async move {
+            let mut accept_stop = stop_rx.clone();
+            loop {
+                tokio::select! {
+                    _ = accept_stop.changed() => break,
+                    accepted = listener.accept() => {
+                        let Ok((mut sock, _)) = accepted else { break };
+                        let mut conn_stop = stop_rx.clone();
+                        tokio::spawn(async move {
+                            let mut buf = [0u8; 1024];
+                            loop {
+                                tokio::select! {
+                                    _ = conn_stop.changed() => break,
+                                    n = sock.read(&mut buf) => match n {
+                                        Ok(0) | Err(_) => break,
+                                        Ok(n) => {
+                                            // One reply per command: a client may pipeline
+                                            // several in one write (redis-rs sends setup
+                                            // commands on connect). Commands are RESP arrays,
+                                            // each starting with '*' at the start of a line.
+                                            let commands = (0..n)
+                                                .filter(|&i| buf[i] == b'*' && (i == 0 || buf[i - 1] == b'\n'))
+                                                .count()
+                                                .max(1);
+                                            let reply = b"+PONG\r\n".as_slice().repeat(commands);
+                                            if sock.write_all(&reply).await.is_err() {
+                                                break;
+                                            }
+                                        }
+                                    },
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+        });
+        stop_tx
+    }
+
+    async fn ping(conn: &mut ConnectionManager) -> redis::RedisResult<String> {
+        redis::cmd("PING").query_async(conn).await
+    }
+
+    #[tokio::test]
+    async fn redis_connection_recovers_after_the_server_drops_it() {
+        let first = bind("127.0.0.1:0".parse().unwrap());
+        let addr = first.local_addr().unwrap();
+        let stop = fake_redis(first);
+
+        let mut conn = tokio::time::timeout(
+            Duration::from_secs(15),
+            connect_redis(&format!("redis://{addr}")),
+        )
+        .await
+        .expect("connect timed out")
+        .expect("connect");
+        assert_eq!(ping(&mut conn).await.expect("first ping"), "PONG");
+
+        // The server goes away and a new one starts on the same address.
+        stop.send(()).unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let _second = fake_redis(bind(addr));
+
+        // Commands may fail briefly while the manager notices the drop and
+        // reconnects. It must then recover without a restart of the process.
+        let mut recovered = false;
+        for _ in 0..30 {
+            if ping(&mut conn).await.is_ok() {
+                recovered = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        assert!(
+            recovered,
+            "the Redis connection did not recover after the server restarted"
+        );
+    }
 
     #[test]
     fn redis_host_drops_credentials_and_path() {
