@@ -103,8 +103,9 @@ fn redis_host(url: &str) -> &str {
 /// `factor` (default 100) to its backoff library as the growth factor, not the
 /// millisecond multiplier its docs describe, with sleeps capped at 60 s. Every
 /// command waits for the reconnect, so one failed attempt would silence the
-/// worker, and delay startup, for minutes. Growing by 2x and capping each sleep
-/// at 5 s retries an outage within about half a minute.
+/// worker, and delay startup, for minutes. Growing by 2x with the base delay capped
+/// at 5 s (jitter adds up to 100% on top) retries an outage within about half a
+/// minute: a failed round of 5 retries takes 17 to 34 s.
 async fn connect_redis(url: &str) -> redis::RedisResult<ConnectionManager> {
     connect_redis_with(url, Duration::from_secs(10)).await
 }
