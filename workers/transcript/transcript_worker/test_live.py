@@ -70,7 +70,8 @@ def test_a_real_job_end_to_end_then_a_cache_hit_that_never_touches_youtube():
     src = CountingSource()
     svc = service(src)
     first = svc.run(job(ZOO, "en"))
-    assert first.markdown.startswith("# ") and first.markdown.count("[00:") >= 3
+    # A 19-second video is two 15-second chunks of text; what matters is that real captions came back.
+    assert first.markdown.startswith("# ") and first.markdown.count("[00:") >= 2
     assert first.transcript["kind"] in ("manual", "auto") and "en" in first.transcript["available_languages"]
     assert (src.listed, src.fetched) == (1, 1)
     assert svc.run(job(ZOO, "en")) == first
