@@ -1,5 +1,6 @@
 import json
 import logging
+import threading
 
 import pytest
 
@@ -31,6 +32,10 @@ class FakeSource:
         if self.fetch_error:
             raise self.fetch_error
         return self.captions
+
+
+def run_in_thread(source):
+    return canary.run_with_deadline(source, deadline=30, rate_interval=0.001)
 
 
 def run(source):
@@ -102,6 +107,45 @@ def test_the_verdict_is_one_json_line_with_the_yt_dlp_version():
     assert data["yt_dlp"] == canary.yt_dlp_version()
 
 
+class HangingSource(FakeSource):
+    """A yt-dlp call that never returns: the pipeline's deadline is only checked between calls."""
+
+    def __init__(self):
+        super().__init__()
+        self.release = threading.Event()
+
+    def list_tracks(self, video_id):
+        self.release.wait(5)
+        return super().list_tracks(video_id)
+
+
+def test_a_call_that_never_returns_ends_in_an_inconclusive_timeout_verdict():
+    src = HangingSource()
+    try:
+        verdict = canary.run_with_deadline(src, deadline=0.2, rate_interval=0.001)
+    finally:
+        src.release.set()
+    assert (verdict.status, verdict.code) == (canary.INCONCLUSIVE, "timeout")
+    assert "did not finish" in verdict.detail
+
+
+@pytest.mark.parametrize("list_error", [None, errors.internal(), errors.blocked()])
+def test_a_run_that_finishes_in_time_returns_its_own_verdict_whole(list_error):
+    verdict = run_in_thread(FakeSource(list_error=list_error))
+    assert verdict == canary.check(FakeSource(list_error=list_error), rate_interval=0.001)
+
+
+@pytest.mark.parametrize(
+    "raised", [SystemExit("secret-from-youtube"), KeyboardInterrupt("secret-from-youtube"), GeneratorExit("secret-from-youtube")]
+)
+def test_a_thread_that_dies_is_broken_not_a_timeout_and_logs_only_the_type(caplog, raised):
+    with caplog.at_level(logging.ERROR, logger="transcript_worker.canary"):
+        verdict = run_in_thread(FakeSource(list_error=raised))
+    assert (verdict.status, verdict.code) == (canary.BROKEN, None)
+    assert type(raised).__name__ in caplog.text
+    assert "secret-from-youtube" not in caplog.text + verdict.to_json()
+
+
 @pytest.mark.parametrize(
     ("source", "expected"),
     [
@@ -113,6 +157,6 @@ def test_the_verdict_is_one_json_line_with_the_yt_dlp_version():
 def test_the_exit_code_follows_the_verdict(monkeypatch, capsys, source, expected):
     real_check = canary.check
     monkeypatch.setattr(canary, "YtDlpSource", lambda: source)
-    monkeypatch.setattr(canary, "check", lambda s: real_check(s, rate_interval=0.001))
+    monkeypatch.setattr(canary, "check", lambda s, **_: real_check(s, rate_interval=0.001))
     assert canary.main() == expected
     assert json.loads(capsys.readouterr().out)["status"] in canary.EXIT_CODES

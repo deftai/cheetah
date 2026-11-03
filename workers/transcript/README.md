@@ -122,9 +122,11 @@ It is automated access to YouTube, under the same Terms and datacenter caveats a
 (see the top of this file), so it is for self-hosters who have turned the worker on. Do not schedule it on the
 hosted deployment, which does not run the worker
 ([`docs/design/youtube-transcripts-hosted-policy.md`](../../docs/design/youtube-transcripts-hosted-policy.md)).
-It makes two operations (list the tracks, download one caption file) and does not retry. Its stdout is one JSON
-line (worker-written text and the yt-dlp version only); stderr may carry short, scrubbed yt-dlp diagnostics, so treat
-the log as holding some third-party text. It exits:
+It makes two operations (list the tracks, download one caption file) and does not retry. A limit of 150 s covers
+the whole run: if a request blocks on the network, the canary prints an `inconclusive` verdict with code `timeout` and
+exits 2, so the cron line still reports (a hang inside native code that holds the GIL is not covered). Its stdout is one JSON line
+(worker-written text and the yt-dlp version only); stderr may carry short, scrubbed yt-dlp diagnostics, so treat the
+log as holding some third-party text. It exits:
 
 | Exit | `status` | Meaning | Do |
 |---|---|---|---|
