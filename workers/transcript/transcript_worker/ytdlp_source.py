@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import re
+import socket
 import tempfile
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import AbstractContextManager
@@ -50,6 +51,13 @@ _UNAVAILABLE = (
     "premieres in", "live event will begin", "this live event",
 )
 _TIMEOUT = ("timed out", "timeout")
+# Transport failures (no route, DNS, a refused or reset connection, a proxy that would not tunnel):
+# `timeout`, not `internal`, which means the worker or yt-dlp is broken. Not the bare "urlopen error" wrapper:
+# that also covers TLS failures.
+_UNREACHABLE = (
+    "tunnel connection failed", "unable to connect to proxy", "name or service not known", "temporary failure in name resolution",
+    "nodename nor servname", "connection refused", "connection reset", "network is unreachable", "no route to host",
+)
 
 
 class _SilentLogger:
@@ -136,8 +144,8 @@ def classify_error(exc: BaseException) -> errors.TranscriptError:
         return errors.unavailable()
     if (
         statuses & {408, 504}
-        or any(isinstance(e, TimeoutError) for e in chain)
-        or any(m in text for m in _TIMEOUT)
+        or any(isinstance(e, TimeoutError | ConnectionError | socket.gaierror) for e in chain)
+        or any(m in text for m in _TIMEOUT + _UNREACHABLE)
     ):
         return errors.timeout()
     return errors.internal("unexpected")
