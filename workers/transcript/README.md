@@ -60,7 +60,8 @@ A bad value stops the worker at start, naming the variable.
   them; the error says to ask for the original language.
 - **Errors** (`error.code`): `no_captions`, `no_track_in_language`, `rate_limited`, `blocked`,
   `unavailable`, `timeout`, `internal`. Messages are written by the worker; no yt-dlp or YouTube
-  text reaches a result.
+  text reaches a result. `timeout` also covers YouTube not being reachable at all (no route, DNS failure, a proxy that
+  will not tunnel), so a worker with no egress reports that rather than `internal`.
 - **Cache:** successes only. An entry is stored under video id + the chosen track, plus a small
   pointer from (video id, requested language) to it, so a repeat request does not contact YouTube at
   all, and two requests that resolve to the same track share one entry. The cache holds third-party
@@ -102,6 +103,58 @@ A bad value stops the worker at start, naming the variable.
 - No cookies, no proxy, no PO token, no JS runtime. Age-restricted, private and members-only videos
   report `unavailable`.
 
+## Keeping yt-dlp working
+
+YouTube changes without notice and yt-dlp follows within days, so the usual way this worker breaks is a
+pin that fell behind. Two checks cover it; they answer different questions.
+
+| Check | Contacts YouTube | Answers |
+|---|---|---|
+| `python -m transcript_worker.pin_age` | No (PyPI only) | Is the pin old while a newer release exists? |
+| `python -m transcript_worker.canary` | Yes, two operations for one public video | Does the pinned yt-dlp still fetch captions from this network? |
+
+**`pin_age`** runs weekly in CI (`.github/workflows/transcript-pin-age.yml`) and fails once the pinned
+release is older than 45 days and a newer one exists. A PyPI outage warns and passes.
+
+**`canary`** is not scheduled by this repository. Whoever runs the worker schedules it, from the
+network the worker uses: a pass from a laptop or a CI runner says nothing about a datacenter address.
+It is automated access to YouTube, under the same Terms and datacenter caveats as the worker itself
+(see the top of this file), so it is for self-hosters who have turned the worker on. Do not schedule it on the
+hosted deployment, which does not run the worker
+([`docs/design/youtube-transcripts-hosted-policy.md`](../../docs/design/youtube-transcripts-hosted-policy.md)).
+It makes two operations (list the tracks, download one caption file) and does not retry. Its stdout is one JSON
+line (worker-written text and the yt-dlp version only); stderr may carry short, scrubbed yt-dlp diagnostics, so treat
+the log as holding some third-party text. It exits:
+
+| Exit | `status` | Meaning | Do |
+|---|---|---|---|
+| 0 | `ok` | A real transcript came back. | Nothing. |
+| 1 | `broken` | The request went through and the answer was wrong (no captions on a video that has them, a file that no longer parses, an unclassified error). | Bump yt-dlp, below. |
+| 2 | `inconclusive` | `blocked`, `rate_limited`, `timeout` or `unavailable`: YouTube refused this network or the moment. | One run is not an alert. Several in a row from a network that used to pass: that network is blocked, which a yt-dlp bump will not fix. |
+
+```bash
+# docker compose (--no-deps: the canary does not need Redis)
+docker compose --profile transcript run --rm --no-deps transcript-worker python -m transcript_worker.canary
+# a crontab line, daily, with the worker's own image or virtualenv: alert on anything but 0 and 2 (exit 1, or a
+# canary that did not run at all, such as 127 or 137); exit 2 is only logged, so scan the log for a run of them
+17 5 * * *  cd /opt/cheetah/workers/transcript && python -m transcript_worker.canary >> /var/log/transcript-canary.log 2>&1; rc=$?; [ $rc -eq 0 ] || [ $rc -eq 2 ] || notify-me
+```
+
+Run it at most once a day.
+
+### Bumping yt-dlp
+
+1. Read the yt-dlp release notes since the pinned version for YouTube extractor fixes.
+2. Change the pin in `requirements.txt` in a change of its own, nothing else in it.
+3. Run the offline tests, then `TRANSCRIPT_LIVE_TEST=1 python -m pytest -m live -v` and the canary, from the
+   network you deploy to.
+4. If captions now need a JavaScript runtime (the Dockerfile says none is installed on purpose), the live test
+   fails with `internal` or `no_captions`; that is a design change, not a bump.
+5. Rebuild the image and restart the worker.
+
+If the newest yt-dlp still fails and YouTube changed something the library has not caught up with, turn the
+feature off (`TRANSCRIPT_WORKER_ENABLED=false` on the gateway) rather than adding retries or workarounds here.
+
 ## Tests
 
 ```bash
@@ -124,5 +177,5 @@ docker stop tw-redis
 TRANSCRIPT_LIVE_TEST=1 python -m pytest -m live -v
 ```
 
-Run the live test after every yt-dlp bump. It is the only thing that notices YouTube changing under
-the pin.
+Run the live test after every yt-dlp bump. With the canary (see "Keeping yt-dlp working"), it is what
+notices YouTube changing under the pin.

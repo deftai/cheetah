@@ -1,5 +1,6 @@
 import io
 import os
+import socket
 
 import pytest
 import yt_dlp
@@ -279,6 +280,19 @@ def test_an_unexpected_exception_on_the_download_is_internal():
         (TransportError("The read operation timed out"), "timeout"),
         (download_error("Read timed out.", TransportError("Read timed out.")), "timeout"),
         (http_error(504), "timeout"),
+        (ConnectionRefusedError(), "timeout"),
+        (socket.gaierror(), "timeout"),
+        (download_error("[Errno 8] nodename nor servname provided"), "timeout"),
+        (download_error("Unable to connect to proxy"), "timeout"),
+        (download_error("[Errno 101] Network is unreachable"), "timeout"),
+        (
+            download_error(
+                "[youtube] x: Unable to download API page: <urlopen error Tunnel connection failed: 403 Forbidden>",
+                TransportError("Tunnel connection failed: 403 Forbidden"),
+            ),
+            "timeout",
+        ),
+        (download_error("<urlopen error [Errno -2] Name or service not known>"), "timeout"),
         (RuntimeError("boom"), "internal"),
         (download_error("something nobody anticipated"), "internal"),
         (KeyError("x"), "internal"),

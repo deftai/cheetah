@@ -1,0 +1,37 @@
+name: transcript-pin-age
+
+# Weekly check that the yt-dlp pin in workers/transcript/requirements.txt has not gone stale. It reads
+# PyPI only and never contacts YouTube, on purpose: whether captions still download is the canary's
+# question (python -m transcript_worker.canary), to be asked from the network the worker runs on, not
+# from a CI runner. See "Keeping yt-dlp working" in workers/transcript/README.md.
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+  pull_request:
+    # A change to requirements.txt is judged as a whole: a PR that touches it goes red while the yt-dlp pin is old.
+    paths:
+      - "workers/transcript/requirements.txt"
+
+permissions:
+  contents: read
+
+jobs:
+  pin-age:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Fail when a newer yt-dlp exists and the pin is old
+        working-directory: workers/transcript
+        run: |
+          status=0
+          python3 -m transcript_worker.pin_age || status=$?
+          # 2 means the pin could not be judged (PyPI unreadable or malformed, or no pin): warn and pass.
+          if [ "$status" -eq 2 ]; then
+            echo "::warning::could not judge the yt-dlp pin"
+            status=0
+          fi
+          exit "$status"

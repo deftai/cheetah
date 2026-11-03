@@ -8,7 +8,7 @@ import transcript_worker
 CORE = {"captions", "errors", "ratelimit", "render", "tracks", "validators"}
 # Runtime modules that do no I/O themselves: Redis and yt-dlp are reached only through a seam or a duck-typed client.
 PURE_RUNTIME = {"config", "cache", "pipeline", "source", "results", "handler"}
-IO_EDGES = {"ytdlp_source", "consumer", "main", "__main__"}
+IO_EDGES = {"ytdlp_source", "consumer", "main", "__main__", "canary", "pin_age"}
 # The core stays pure: the network, Redis and yt-dlp belong to the runtime slice.
 FORBIDDEN = {"redis", "yt_dlp", "requests", "httpx", "aiohttp", "socket", "subprocess", "urllib"}
 
