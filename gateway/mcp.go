@@ -274,6 +274,7 @@ func mcpScrape(c *fiber.Ctx, rpc jsonrpcRequest, params toolCallParams, queue *Q
 	if err != nil {
 		return mcpToolError(c, rpc, err.Error())
 	}
+	args.URL = canonicalURL(args.URL)
 
 	if args.Format == "" {
 		args.Format = "markdown"
@@ -520,6 +521,7 @@ func mcpPlatformTool(c *fiber.Ctx, rpc jsonrpcRequest, params toolCallParams, qu
 	if err != nil {
 		return mcpToolError(c, rpc, err.Error())
 	}
+	args.URL = canonicalURL(args.URL)
 
 	plan, _ := c.Locals("plan").(Plan)
 	if !IsTierAllowed(decision.Tier, plan.AllowedTiers) {
@@ -642,6 +644,7 @@ func mcpCrawl(c *fiber.Ctx, rpc jsonrpcRequest, params toolCallParams, queue *Qu
 	if err != nil {
 		return mcpToolError(c, rpc, err.Error())
 	}
+	args.URL = canonicalURL(args.URL)
 
 	if args.MaxPages <= 0 {
 		args.MaxPages = 10
@@ -718,6 +721,7 @@ func mcpExtract(c *fiber.Ctx, rpc jsonrpcRequest, params toolCallParams, queue *
 	if err != nil {
 		return mcpToolError(c, rpc, err.Error())
 	}
+	args.URL = canonicalURL(args.URL)
 
 	if len(args.ExtractSchema) == 0 {
 		return mcpToolError(c, rpc, "extract_schema is required")

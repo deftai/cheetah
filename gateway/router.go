@@ -188,13 +188,6 @@ func IsTierAllowed(tier Tier, allowed []string) bool {
 }
 
 func LogRouteDecision(jobID string, rawURL string, decision RouteDecision) {
-	redacted := rawURL
-	if parsed, err := url.Parse(rawURL); err == nil {
-		parsed.User = nil
-		parsed.RawQuery = ""
-		parsed.Fragment = ""
-		redacted = parsed.String()
-	}
 	log.Printf("route %s: tier=%s strategy=%q reason=%q confidence=%.2f url=%s",
-		jobID, decision.Tier, decision.Strategy, decision.Reason, decision.Confidence, redacted)
+		jobID, decision.Tier, decision.Strategy, decision.Reason, decision.Confidence, redactURLForLog(rawURL))
 }
