@@ -441,7 +441,7 @@ func TestPlatformToolError(t *testing.T) {
 		{"get_repository_content", "https://github.com.evil.example/o/r", `use "scrape"`},
 		{"get_thread", "https://news.ycombinator.com/", `use "scrape"`},
 		{"get_thread", "https://news.ycombinator.com/item?id=abc", `use "scrape"`},
-		{"get_thread", "not a url", `use "scrape"`},
+		{"get_thread", "not a url", `malformed`},
 		// Host tricks: the platform is the URL's real host, not text elsewhere in it.
 		{"get_repository_content", "https://github.com@evil.example/o/r", `use "scrape"`},
 		{"get_repository_content", "https://evil.example/?x=github.com/o/r", `use "scrape"`},
@@ -474,8 +474,8 @@ func TestPlatformToolError(t *testing.T) {
 		{"get_repository_content", "https://github.com/o/r/blob/main/.", "not supported"},
 		{"get_repository_content", "https://github.com/o/r/blob/main/%2e%2E/x", "not supported"},
 		{"get_repository_content", "https://github.com/o/r/blob/../x/y", "not supported"},
-		// A backslash in the path is rejected earlier, by the shared URL parse, as malformed.
-		{"get_repository_content", `https://github.com/o/r/blob/main/a\b`, `use "scrape"`},
+		// A backslash in the path is rejected by the shared URL parse as malformed.
+		{"get_repository_content", `https://github.com/o/r/blob/main/a\b`, `malformed`},
 		{"get_repository_content", "https://github.com:99999/o/r", "not supported"},
 		{"get_thread", "https://news.ycombinator.com/%69tem?id=1", "not supported"},
 		{"get_thread", "https://news.ycombinator.com/item?id=%zz&id=5", "not supported"},
@@ -496,7 +496,7 @@ func TestPlatformToolError(t *testing.T) {
 		{"get_repository_content", "https://github.com/o/r/blob/main/a.go ", "not supported"},
 		{"get_repository_content", "https://github.com/o/r/blob/main/a\u00a0b.go", "not supported"},
 		{"get_thread", "https://news.ycombinator.com/item?id=1 ", `use "scrape"`}, // the router already refuses a non-numeric id
-		{"get_repository_content", " https://github.com/o/r", `use "scrape"`},
+		{"get_repository_content", " https://github.com/o/r", `malformed`},
 		// Encoded characters that the worker does decode stay supported.
 		{"get_repository_content", "https://github.com/o/r/blob/main/My%20Doc%C3%A9.md", ""},
 		{"get_repository_content", "https://github.com/o/r/blob/feat%2Bx/src/lib.rs", ""},

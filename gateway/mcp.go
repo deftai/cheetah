@@ -485,6 +485,9 @@ func platformURLSupported(strategy, rawURL string) bool {
 // otherwise a message saying what the tool accepts and where the URL belongs.
 // It never repeats the submitted URL, which may carry credentials in its query.
 func platformToolError(tool, rawURL string, decision RouteDecision) string {
+	if _, err := parseSubmittedURL(rawURL); err != nil {
+		return fmt.Sprintf("%s only accepts %s; url is malformed: %s", tool, platformTools[tool].accepts, err)
+	}
 	spec := platformTools[tool]
 	if decision.Strategy == spec.strategy {
 		if platformURLSupported(spec.strategy, rawURL) {
