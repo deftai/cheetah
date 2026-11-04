@@ -27,6 +27,9 @@ func parseSubmittedURL(rawURL string) (*url.URL, error) {
 	}
 	r, err := url.ParseRequestURI(rawURL)
 	if err != nil {
+		if u.Host != "" && u.Path == "" && (u.Fragment != "" || u.RawQuery != "") {
+			return nil, errors.New("add a / before the # or ? (e.g. host/#section)")
+		}
 		return nil, redactURLError(err)
 	}
 	if u.Scheme != r.Scheme || u.Host != r.Host || u.User.String() != r.User.String() {
@@ -166,6 +169,29 @@ func isPrivateIP(ip net.IP) bool {
 		return isPrivateIP(net.IP(ip16[2:6]))
 	}
 	return false
+}
+
+// redactURLForLog returns scheme://host only, so credentials, paths, query
+// parameters and fragments never reach the log.
+func redactURLForLog(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return "(unparseable)"
+	}
+	return u.Scheme + "://" + u.Hostname()
+}
+
+// canonicalURL returns the parsed form of a URL that has already passed
+// parseSubmittedURL: userinfo and fragment stripped, encoding normalised.
+// It is a no-op if rawURL cannot be parsed (which cannot happen after validation).
+func canonicalURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	u.User = nil
+	u.Fragment = ""
+	return u.String()
 }
 
 // redactURLError drops the quoted input that *url.Error embeds, since the

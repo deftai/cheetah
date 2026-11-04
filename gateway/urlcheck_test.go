@@ -286,6 +286,71 @@ func TestClassifyUsesValidatedHost(t *testing.T) {
 	}
 }
 
+func TestRedactURLForLog(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"plain", "https://example.com/secret/path?token=abc", "https://example.com"},
+		{"userinfo", "https://user:s3cret@example.com/x", "https://example.com"},
+		{"port", "https://example.com:8443/admin?key=xyz", "https://example.com"},
+		{"fragment", "https://example.com/page#section", "https://example.com"},
+		{"http", "http://example.com/a/b/c", "http://example.com"},
+		{"unparseable", "://broken", "(unparseable)"},
+		{"no host", "mailto:a@b.com", "(unparseable)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := redactURLForLog(tt.raw)
+			if got != tt.want {
+				t.Fatalf("redactURLForLog(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+			if strings.Contains(got, "s3cret") || strings.Contains(got, "token") || strings.Contains(got, "secret") {
+				t.Fatalf("redactURLForLog(%q) leaks sensitive data: %q", tt.raw, got)
+			}
+		})
+	}
+}
+
+func TestCanonicalURL(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"strips userinfo", "https://user:pw@example.com/path", "https://example.com/path"},
+		{"strips fragment", "https://example.com/page#top", "https://example.com/page"},
+		{"preserves query", "https://example.com/search?q=go", "https://example.com/search?q=go"},
+		{"preserves path", "https://example.com/a/b/c", "https://example.com/a/b/c"},
+		{"preserves port", "https://example.com:8080/x", "https://example.com:8080/x"},
+		{"unparseable fallback", "://broken", "://broken"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := canonicalURL(tt.raw)
+			if got != tt.want {
+				t.Fatalf("canonicalURL(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHostFragmentGivesActionableError(t *testing.T) {
+	for _, raw := range []string{
+		"https://example.com#top",
+		"https://example.com#section",
+	} {
+		_, err := parseSubmittedURL(raw)
+		if err == nil {
+			t.Fatalf("%q: expected rejection", raw)
+		}
+		if !strings.Contains(err.Error(), "add a /") {
+			t.Fatalf("%q: expected actionable error, got %q", raw, err.Error())
+		}
+	}
+}
+
 func TestParseSubmittedURLErrorOmitsCredentials(t *testing.T) {
 	for _, raw := range []string{
 		"https://user:s3cret@example.com:99999x/", // fails url.Parse

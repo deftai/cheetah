@@ -195,7 +195,7 @@ func (cm *CrawlManager) fetchPage(ctx context.Context, rawURL string) crawlResul
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		result.Error = "fetch failed"
-		log.Printf("crawl request setup %s: %v", rawURL, err)
+		log.Printf("crawl request setup %s: %v", redactURLForLog(rawURL), err)
 		return result
 	}
 	httpReq.Header.Set("User-Agent", crawlUserAgent)
@@ -204,7 +204,7 @@ func (cm *CrawlManager) fetchPage(ctx context.Context, rawURL string) crawlResul
 	resp, err := cm.httpClient.Do(httpReq)
 	if err != nil {
 		result.Error = "fetch failed"
-		log.Printf("crawl fetch %s: %v", rawURL, err)
+		log.Printf("crawl fetch %s: %v", redactURLForLog(rawURL), err)
 		return result
 	}
 	defer resp.Body.Close()
@@ -225,7 +225,7 @@ func (cm *CrawlManager) fetchPage(ctx context.Context, rawURL string) crawlResul
 	body, err := io.ReadAll(io.LimitReader(resp.Body, crawlMaxBodyBytes))
 	if err != nil {
 		result.Error = "fetch failed"
-		log.Printf("crawl body read %s: %v", rawURL, err)
+		log.Printf("crawl body read %s: %v", redactURLForLog(rawURL), err)
 		return result
 	}
 

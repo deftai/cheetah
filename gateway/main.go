@@ -215,6 +215,7 @@ func handleScrape(queue *QueueClient) fiber.Handler {
 				Error:   err.Error(),
 			})
 		}
+		req.URL = canonicalURL(req.URL)
 		req.ResolvedIP = resolvedIP
 
 		if req.Format == "" {
@@ -282,6 +283,7 @@ func handleCrawl(queue *QueueClient) fiber.Handler {
 				Error:   err.Error(),
 			})
 		}
+		req.URL = canonicalURL(req.URL)
 		req.ResolvedIP = resolvedIP
 
 		if req.MaxPages <= 0 {
@@ -389,6 +391,7 @@ func handleExtract(queue *QueueClient, aiEndpoint string) fiber.Handler {
 				Error:   err.Error(),
 			})
 		}
+		req.URL = canonicalURL(req.URL)
 
 		if len(req.ExtractSchema) == 0 {
 			return c.Status(fiber.StatusBadRequest).JSON(ErrorResponse{
