@@ -1,4 +1,4 @@
 # Runtime dependencies, pinned. yt-dlp breaks whenever YouTube changes something: bump it on purpose,
 # in its own change, and run the live test (README) before shipping the new pin.
 redis==8.1.0
-yt-dlp==2026.8.19
+yt-dlp==2026.10.26

@@ -94,7 +94,7 @@ def test_main_maps_a_failed_or_truncated_download_to_exit_2(monkeypatch, capsys,
 
 
 def test_main_maps_malformed_release_data_to_exit_2_not_a_traceback(monkeypatch, capsys):
-    bad = {"info": {"version": "2026.10.20"}, "releases": {"2026.8.19": [{"upload_time_iso_8601": "not a date"}]}}
+    bad = {"info": {"version": "2026.10.20"}, "releases": {"2026.10.26": [{"upload_time_iso_8601": "not a date"}]}}
     monkeypatch.setattr(pin_age, "fetch_pypi", lambda: bad)
     assert pin_age.main() == 2
     out = capsys.readouterr().out

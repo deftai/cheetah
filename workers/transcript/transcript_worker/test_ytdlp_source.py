@@ -1,6 +1,7 @@
 import io
 import os
 import socket
+import ssl
 
 import pytest
 import yt_dlp
@@ -293,6 +294,13 @@ def test_an_unexpected_exception_on_the_download_is_internal():
             "timeout",
         ),
         (download_error("<urlopen error [Errno -2] Name or service not known>"), "timeout"),
+        (download_error("<urlopen error [Errno -3] Temporary failure in name resolution>"), "timeout"),
+        (download_error("Connection reset by peer"), "timeout"),
+        (download_error("[Errno 113] No route to host"), "timeout"),
+        (download_error("Connection refused"), "timeout"),
+        (ssl.SSLError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed"), "timeout"),
+        (ssl.SSLCertVerificationError("[SSL: CERTIFICATE_VERIFY_FAILED]"), "timeout"),
+        (download_error("ssl handshake error", ssl.SSLError(1, "tls handshake")), "timeout"),
         (RuntimeError("boom"), "internal"),
         (download_error("something nobody anticipated"), "internal"),
         (KeyError("x"), "internal"),
