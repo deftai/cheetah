@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import re
 import socket
+import ssl
 import tempfile
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import AbstractContextManager
@@ -144,7 +145,7 @@ def classify_error(exc: BaseException) -> errors.TranscriptError:
         return errors.unavailable()
     if (
         statuses & {408, 504}
-        or any(isinstance(e, TimeoutError | ConnectionError | socket.gaierror) for e in chain)
+        or any(isinstance(e, TimeoutError | ConnectionError | socket.gaierror | ssl.SSLError) for e in chain)
         or any(m in text for m in _TIMEOUT + _UNREACHABLE)
     ):
         return errors.timeout()
