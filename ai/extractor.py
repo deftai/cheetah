@@ -9,6 +9,26 @@ import urllib.parse
 import httpx
 from markdownify import markdownify
 
+
+class ExtractionError(Exception):
+    """Base for all extraction-related failures."""
+
+
+class AIEndpointError(ExtractionError):
+    """Network or HTTP error communicating with the AI endpoint."""
+
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class MalformedResponseError(ExtractionError):
+    """AI endpoint returned a response that isn't usable JSON."""
+
+    def __init__(self, message: str, raw_output: str | None = None):
+        super().__init__(message)
+        self.raw_output = raw_output
+
 log = logging.getLogger(__name__)
 
 
@@ -87,15 +107,49 @@ async def extract_json(html: str, schema: dict) -> dict:
         url += "/chat/completions"
 
     log.info("extraction request: url=%s content_length=%d", parsed.hostname, len(markdown))
-    resp = await _get_client().post(url, headers=headers, json=payload)
-    resp.raise_for_status()
+    try:
+        resp = await _get_client().post(url, headers=headers, json=payload)
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise AIEndpointError(
+            f"AI endpoint returned HTTP {exc.response.status_code}",
+            status_code=exc.response.status_code,
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise AIEndpointError(str(exc)) from exc
 
-    body = resp.json()
+    try:
+        body = resp.json()
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise MalformedResponseError(
+            f"AI endpoint returned non-JSON response: {exc}",
+            raw_output=resp.text[:200],
+        ) from exc
+
+    if not isinstance(body, dict):
+        raise MalformedResponseError(
+            "AI endpoint returned non-object JSON",
+            raw_output=str(body)[:200],
+        )
+
     choices = body.get("choices")
     if not choices:
-        raise RuntimeError("AI endpoint returned no choices")
-    content = choices[0]["message"]["content"]
-    return json.loads(content)
+        raise MalformedResponseError("AI endpoint returned no choices")
+
+    try:
+        content = choices[0]["message"]["content"]
+    except (KeyError, TypeError, IndexError) as exc:
+        raise MalformedResponseError(
+            f"AI response has unexpected structure: {exc}",
+        ) from exc
+
+    try:
+        return json.loads(content)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise MalformedResponseError(
+            f"AI response is not valid JSON: {exc}",
+            raw_output=str(content)[:200] if content is not None else None,
+        ) from exc
 
 
 def html_to_markdown(html: str) -> str:

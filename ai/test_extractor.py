@@ -2,8 +2,12 @@ import asyncio
 import json
 from unittest.mock import AsyncMock, patch, MagicMock
 
+import httpx
 import pytest
-from extractor import extract_json, html_to_markdown, auto_chunk
+from extractor import (
+    extract_json, html_to_markdown, auto_chunk,
+    ExtractionError, AIEndpointError, MalformedResponseError,
+)
 
 
 # --- html_to_markdown ---
@@ -116,12 +120,123 @@ def test_extract_json_calls_api(mock_completion, mock_client):
 
 
 def test_extract_json_raises_on_http_error(mock_client):
-    mock_client.post.side_effect = Exception("500 Server Error")
+    resp = MagicMock()
+    resp.status_code = 500
+    resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "Server Error", request=MagicMock(), response=resp,
+    )
+    mock_client.post.return_value = resp
 
     with patch("extractor._get_client", return_value=mock_client), \
          patch("extractor._API_BASE", "https://api.example.com/v1"):
-        with pytest.raises(Exception, match="500"):
+        with pytest.raises(AIEndpointError, match="HTTP 500") as exc_info:
             asyncio.run(extract_json("<p>test</p>", {}))
+        assert exc_info.value.status_code == 500
+        assert isinstance(exc_info.value, ExtractionError)
+
+
+def test_extract_json_raises_on_connection_error(mock_client):
+    mock_client.post.side_effect = httpx.ConnectError("Connection refused")
+
+    with patch("extractor._get_client", return_value=mock_client), \
+         patch("extractor._API_BASE", "https://api.example.com/v1"):
+        with pytest.raises(AIEndpointError, match="Connection refused"):
+            asyncio.run(extract_json("<p>test</p>", {}))
+
+
+def test_extract_json_raises_on_no_choices(mock_client):
+    resp = MagicMock()
+    resp.json.return_value = {"choices": []}
+    resp.raise_for_status = MagicMock()
+    mock_client.post.return_value = resp
+
+    with patch("extractor._get_client", return_value=mock_client), \
+         patch("extractor._API_BASE", "https://api.example.com/v1"):
+        with pytest.raises(MalformedResponseError, match="no choices"):
+            asyncio.run(extract_json("<p>test</p>", {}))
+
+
+def test_extract_json_raises_on_invalid_json_response(mock_client):
+    resp = MagicMock()
+    resp.json.return_value = {
+        "choices": [{"message": {"content": "not json {{"}}]
+    }
+    resp.raise_for_status = MagicMock()
+    mock_client.post.return_value = resp
+
+    with patch("extractor._get_client", return_value=mock_client), \
+         patch("extractor._API_BASE", "https://api.example.com/v1"):
+        with pytest.raises(MalformedResponseError, match="not valid JSON") as exc_info:
+            asyncio.run(extract_json("<p>test</p>", {}))
+        assert exc_info.value.raw_output == "not json {{"
+
+
+def test_extract_json_raises_on_non_json_http_body(mock_client):
+    resp = MagicMock()
+    resp.json.side_effect = json.JSONDecodeError("Expecting value", "", 0)
+    resp.text = "<html>502 Bad Gateway</html>"
+    resp.raise_for_status = MagicMock()
+    mock_client.post.return_value = resp
+
+    with patch("extractor._get_client", return_value=mock_client), \
+         patch("extractor._API_BASE", "https://api.example.com/v1"):
+        with pytest.raises(MalformedResponseError, match="non-JSON response"):
+            asyncio.run(extract_json("<p>test</p>", {}))
+
+
+def test_extract_json_raises_on_unexpected_structure(mock_client):
+    resp = MagicMock()
+    resp.json.return_value = {"choices": [{"wrong_key": "no message"}]}
+    resp.raise_for_status = MagicMock()
+    mock_client.post.return_value = resp
+
+    with patch("extractor._get_client", return_value=mock_client), \
+         patch("extractor._API_BASE", "https://api.example.com/v1"):
+        with pytest.raises(MalformedResponseError, match="unexpected structure"):
+            asyncio.run(extract_json("<p>test</p>", {}))
+
+
+def test_raw_output_truncated_to_200_chars(mock_client):
+    long_output = "x" * 500
+    resp = MagicMock()
+    resp.json.return_value = {
+        "choices": [{"message": {"content": long_output}}]
+    }
+    resp.raise_for_status = MagicMock()
+    mock_client.post.return_value = resp
+
+    with patch("extractor._get_client", return_value=mock_client), \
+         patch("extractor._API_BASE", "https://api.example.com/v1"):
+        with pytest.raises(MalformedResponseError) as exc_info:
+            asyncio.run(extract_json("<p>test</p>", {}))
+        assert len(exc_info.value.raw_output) == 200
+
+
+def test_extract_json_raises_on_non_dict_json(mock_client):
+    resp = MagicMock()
+    resp.json.return_value = ["not", "a", "dict"]
+    resp.raise_for_status = MagicMock()
+    mock_client.post.return_value = resp
+
+    with patch("extractor._get_client", return_value=mock_client), \
+         patch("extractor._API_BASE", "https://api.example.com/v1"):
+        with pytest.raises(MalformedResponseError, match="non-object JSON"):
+            asyncio.run(extract_json("<p>test</p>", {}))
+
+
+def test_extract_json_raises_on_null_content(mock_client):
+    resp = MagicMock()
+    resp.json.return_value = {
+        "choices": [{"message": {"content": None}}]
+    }
+    resp.raise_for_status = MagicMock()
+    mock_client.post.return_value = resp
+
+    with patch("extractor._get_client", return_value=mock_client), \
+         patch("extractor._API_BASE", "https://api.example.com/v1"):
+        with pytest.raises(MalformedResponseError, match="not valid JSON") as exc_info:
+            asyncio.run(extract_json("<p>test</p>", {}))
+        assert exc_info.value.raw_output is None
 
 
 def test_extract_json_raises_without_endpoint():
