@@ -32,7 +32,7 @@ cd ai && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python -m pytest test_extractor.py -v
 
 # Transcript worker (Python)
-cd workers/transcript && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+cd workers/transcript && python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/python -m pytest -v
 
 # Router (Python)

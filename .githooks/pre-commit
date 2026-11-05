@@ -10,7 +10,7 @@ case "$branch" in
 esac
 
 readded=$(git diff --cached --name-only --diff-filter=AM \
-    | grep -E '^(\.deft/|\.agents/|\.claude/settings\.json|\.claude/(commands|skills)/deft|\.cursor/hooks\.json|\.grok/hooks/|\.codex/|xbrief/schemas/|\.githooks/_(deft|directive)-run\.sh)' || true)
+    | grep -E '^(\.deft/|\.agents/|\.claude/settings\.json|\.claude/(commands|skills)/deft|\.cursor/hooks\.json|\.cursor/(commands|skills)/deft|\.grok/hooks/|\.grok/commands/deft|\.github/skills/deft|\.codex/|xbrief/schemas/|\.githooks/_(deft|directive)-run\.sh)' || true)
 if [ -n "$readded" ]; then
     echo "pre-commit: Deft Directive artifacts are staged:" >&2
     echo "$readded" | sed 's/^/  /' >&2
