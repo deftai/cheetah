@@ -212,6 +212,33 @@ def test_raw_output_truncated_to_200_chars(mock_client):
         assert len(exc_info.value.raw_output) == 200
 
 
+def test_extract_json_raises_on_non_dict_json(mock_client):
+    resp = MagicMock()
+    resp.json.return_value = ["not", "a", "dict"]
+    resp.raise_for_status = MagicMock()
+    mock_client.post.return_value = resp
+
+    with patch("extractor._get_client", return_value=mock_client), \
+         patch("extractor._API_BASE", "https://api.example.com/v1"):
+        with pytest.raises(MalformedResponseError, match="non-object JSON"):
+            asyncio.run(extract_json("<p>test</p>", {}))
+
+
+def test_extract_json_raises_on_null_content(mock_client):
+    resp = MagicMock()
+    resp.json.return_value = {
+        "choices": [{"message": {"content": None}}]
+    }
+    resp.raise_for_status = MagicMock()
+    mock_client.post.return_value = resp
+
+    with patch("extractor._get_client", return_value=mock_client), \
+         patch("extractor._API_BASE", "https://api.example.com/v1"):
+        with pytest.raises(MalformedResponseError, match="not valid JSON") as exc_info:
+            asyncio.run(extract_json("<p>test</p>", {}))
+        assert exc_info.value.raw_output is None
+
+
 def test_extract_json_raises_without_endpoint():
     with patch("extractor._API_BASE", ""):
         with pytest.raises(RuntimeError, match="AI_ENDPOINT_URL not configured"):
