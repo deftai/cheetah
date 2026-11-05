@@ -1,2 +1,0 @@
-# Deft framework: the vendored payload is outside the consumer Prettier gate (#2534).
-.deft/core/
