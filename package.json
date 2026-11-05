@@ -1,6 +1,0 @@
-{
-  "private": true,
-  "devDependencies": {
-    "@deftai/directive": "0.119.11"
-  }
-}

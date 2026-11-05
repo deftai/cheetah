@@ -1,5 +1,0 @@
-# Deft framework: exclude the vendored payload from CodeQL analysis (#1430).
-# .deft/core/** is packaged framework code, not consumer source.
-name: "CodeQL config (deft)"
-paths-ignore:
-  - '.deft/core/**'
