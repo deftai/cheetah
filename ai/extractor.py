@@ -118,17 +118,31 @@ async def extract_json(html: str, schema: dict) -> dict:
     except httpx.HTTPError as exc:
         raise AIEndpointError(str(exc)) from exc
 
-    body = resp.json()
+    try:
+        body = resp.json()
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise MalformedResponseError(
+            f"AI endpoint returned non-JSON response: {exc}",
+            raw_output=resp.text[:200],
+        ) from exc
+
     choices = body.get("choices")
     if not choices:
         raise MalformedResponseError("AI endpoint returned no choices")
-    content = choices[0]["message"]["content"]
+
+    try:
+        content = choices[0]["message"]["content"]
+    except (KeyError, TypeError, IndexError) as exc:
+        raise MalformedResponseError(
+            f"AI response has unexpected structure: {exc}",
+        ) from exc
+
     try:
         return json.loads(content)
     except json.JSONDecodeError as exc:
         raise MalformedResponseError(
             f"AI response is not valid JSON: {exc}",
-            raw_output=content,
+            raw_output=content[:200],
         ) from exc
 
 
