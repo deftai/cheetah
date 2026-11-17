@@ -40,14 +40,26 @@ MSG_FILE="${1:?commit-msg hook requires the message file path}"
 # one AISIG_ALLOW=1 away. Do not narrow this to display names to "fix" that;
 # doing so is what let "GitHub Copilot" through in the first place.
 #
-# `\b` word boundaries rather than a bare substring: without them `amp` in the
-# list below matches "example" and would reject every @example.com co-author.
-# `\b` is chosen over BSD's `[[:<:]]` because GNU grep supports it too.
+# Two lists, because one rule cannot serve both. A bare substring is right for
+# the long, distinctive tokens: bots extend them freely (`ClaudeBot`,
+# `OpenAIBot`, `claudecode`, the `1+cursoragent@users.noreply.github.com` login)
+# and a boundary rule let all of those through. But it is wrong for the short
+# tokens that sit inside ordinary words and names: `amp` in "example"/"champ",
+# `bard` in "Hubbard", `cursor` in "precursor". Those need a LETTER-aware
+# boundary. NOT `\b`: `_` and digits are word characters, so `\b` does not fire
+# next to them and `Anthropic_Bot`, `claude_bot@x.c` and `Claude4` slipped by.
 # `google-labs-jules` not bare `jules`, and `sweep-ai` not bare `sweep`: both
 # are human names, and the real bots always carry the longer token. The same
 # reasoning keeps `cody` and `augment` out. Every token below was verified to
 # appear in a trailer git actually credits.
-AI='claude|anthropic|cursor|copilot|codex|devin|aider|windsurf|sourcegraph|amp|openai|gemini|bard|google-labs-jules|openhands|all-hands|tabnine|sweep-ai'
+AI_LONG='claude|anthropic|copilot|openai|sourcegraph|windsurf|tabnine|openhands|all-hands|google-labs-jules|sweep-ai|cursoragent'
+AI_SHORT='cursor|codex|devin|aider|amp|gemini|bard'
+# Spelled once; both scan sites use it. `\$` so the `$` reaches grep as an anchor.
+# The OUTER group is load-bearing: alternation has the lowest precedence, so
+# without it `"$KEY.*$AI_RE"` parses as (key + long token) OR (a bare short token
+# ANYWHERE on ANY line) and a human co-author plus the word "cursor" in the body
+# is rejected, with a non-trailer line reported as the offender.
+AI_RE="(($AI_LONG)|(^|[^[:alpha:]])($AI_SHORT)([^[:alpha:]]|\$))"
 
 # The trailer key, tolerating the whitespace git itself tolerates. git's trailer
 # parser accepts space/tab BEFORE the colon, so `Co-authored-by : Claude <...>`
@@ -66,7 +78,7 @@ KEY="^[[:space:]]*$KEY_CORE"
 
 # Scan, distinguishing "no match" (grep exit 1) from "could not scan" (exit >1).
 # `if grep ...; then` collapses the two, and `set -e` is suspended inside an
-# `if` condition — so an unreadable file or a grep lacking `\b` would fail OPEN
+# `if` condition — so an unreadable file or a grep lacking ERE support would fail OPEN
 # and accept the commit unscanned. A guard must fail closed.
 # `-a` so a message carrying a NUL byte is still scanned as text.
 #
@@ -112,7 +124,7 @@ find_ai_trailer() {
   # line), so anchoring is safe at this stage.
   scan "$KEY" "$file" || return 1
 
-  if scan "$KEY.*\b($AI)\b" "$file"; then
+  if scan "$KEY.*$AI_RE" "$file"; then
     offending=$SCAN_OUT
     return 0
   fi
@@ -128,6 +140,14 @@ find_ai_trailer() {
   # clean. One awk pass is faithful to git's folding rule (a line starting with
   # whitespace continues the one before it), position-independent, forks no git.
   #
+  # Comment lines (`#...`) are TRANSPARENT to the fold. git's default cleanup
+  # strips them AFTER this hook has accepted the message, so a `# note` between
+  # a trailer and its indented continuation vanishes and the continuation folds
+  # into the trailer: `Co-authored-by: Foo` / `# c` / `  <noreply@anthropic.com>`
+  # was accepted here and committed as an AI trailer. Skipping them is the
+  # strict reading (it also covers --cleanup=verbatim, where it only over-rejects).
+  # A non-default core.commentChar is not honoured; that remains an open gap.
+  #
   # printf-streaming, not `buf = buf " " $0`: the accumulating form is quadratic
   # — 4x the input costs roughly 20x the time, and 200k indented lines runs to
   # over a minute against ~0.1s here. Output is byte-identical; absolute
@@ -136,9 +156,11 @@ find_ai_trailer() {
   # folding a diagnostic into the text being scanned only invites confusion.
   set +e
   unfolded=$(LC_ALL=C awk '
-        { if ($0 ~ /^[[:space:]]/ && NR > 1) printf " %s", $0
-          else { if (NR > 1) printf "\n"; printf "%s", $0 } }
-        END { if (NR > 0) printf "\n" }
+        $0 ~ /^#/ { next }
+        { if ($0 ~ /^[[:space:]]/ && n > 0) printf " %s", $0
+          else { if (n > 0) printf "\n"; printf "%s", $0 }
+          n++ }
+        END { if (n > 0) printf "\n" }
   ' "$file" 2>/dev/null)
   aw_rc=$?
   set -e
@@ -154,7 +176,7 @@ find_ai_trailer() {
   # happened to follow a blank line. Narrow regardless: this runs only when a
   # co-author key is already present, and a hit needs key and token on one
   # post-fold line. Through scan(), so it keeps the fail-closed guarantee.
-  if scan "$KEY_CORE.*\b($AI)\b" <(printf '%s\n' "$unfolded"); then
+  if scan "$KEY_CORE.*$AI_RE" <(printf '%s\n' "$unfolded"); then
     offending=$SCAN_OUT
     return 0
   fi
@@ -179,9 +201,11 @@ else
     echo
     # Sanitise before printing. A squashed or fetched message is not authored
     # by the committer, and a raw ESC or CR in it can repaint this rejection as
-    # a success. [[:cntrl:]] under LC_ALL=C is bytewise 0x00-0x1F plus 0x7F, so
-    # it catches CR — which [:space:] did not — while leaving UTF-8 names legible.
-    printf '%s\n' "$offending" | LC_ALL=C sed -e 's/[[:cntrl:]]/?/g' -e 's/^/    /'
+    # a success. [[:cntrl:]] was not enough: it is only 0x00-0x1F plus 0x7F, so
+    # UTF-8 C1 controls (U+009B is CSI to xterm/VTE) and bidi overrides (U+202E)
+    # passed through. Replace every byte outside printable ASCII instead, which
+    # costs legibility of non-ASCII names in this one diagnostic and nothing else.
+    printf '%s\n' "$offending" | LC_ALL=C tr -c '\040-\176\n' '?' | sed -e 's/^/    /'
     echo
     echo "  GitHub credits Co-authored-by trailers, so this would list an AI tool"
     echo "  as a contributor to this repo."
@@ -272,7 +296,7 @@ if [ -f "$candidate" ] && [ -x "$candidate" ] && ! [ "$candidate" -ef "$0" ]; th
     echo
     # Sanitised as at the main rejection above: raw ESC or CR would repaint
     # this as a success.
-    printf '%s\n' "$offending" | LC_ALL=C sed -e 's/[[:cntrl:]]/?/g' -e 's/^/    /'
+    printf '%s\n' "$offending" | LC_ALL=C tr -c '\040-\176\n' '?' | sed -e 's/^/    /'
     echo
     echo "  $candidate rewrote the message after this guard had cleared it."
     echo
