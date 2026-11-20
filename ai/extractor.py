@@ -1,5 +1,6 @@
 """Structured extraction via serverless GPU endpoint (OpenAI-compatible API)."""
 
+import asyncio
 import json
 import logging
 import os
@@ -59,6 +60,13 @@ try:
     _TIMEOUT = int(os.environ.get("AI_TIMEOUT", "30"))
 except (ValueError, TypeError):
     _TIMEOUT = 30
+try:
+    _MAX_RETRIES = max(0, int(os.environ.get("AI_MAX_RETRIES", "2")))
+except (ValueError, TypeError):
+    _MAX_RETRIES = 2
+_RETRY_BASE_DELAY = 0.5
+_RETRY_MAX_DELAY = 8.0
+_RETRYABLE_STATUS = frozenset({429, 502, 503, 504})
 _LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
 
 _client: httpx.AsyncClient | None = None
@@ -134,16 +142,7 @@ async def extract_json(html: str, schema: dict) -> dict:
         url += "/chat/completions"
 
     log.info("extraction request: url=%s content_length=%d", parsed.hostname, len(markdown))
-    try:
-        resp = await _get_client().post(url, headers=headers, json=payload)
-        resp.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        raise AIEndpointError(
-            f"AI endpoint returned HTTP {exc.response.status_code}",
-            status_code=exc.response.status_code,
-        ) from exc
-    except httpx.HTTPError as exc:
-        raise AIEndpointError(str(exc)) from exc
+    resp = await _post_with_retry(url, headers, payload)
 
     try:
         body = resp.json()
@@ -202,6 +201,52 @@ def _validate_against_schema(result, schema: dict, validator_cls) -> None:
         errors=errors,
         raw_output=json.dumps(result)[:200],
     )
+
+
+def _retry_delay(attempt: int, response: httpx.Response | None) -> float:
+    """Exponential backoff (0.5s, 1s, 2s, ...), or the server's Retry-After if larger."""
+    delay = _RETRY_BASE_DELAY * (2 ** attempt)
+    if response is not None:
+        try:
+            delay = max(delay, float(response.headers.get("Retry-After", 0)))
+        except (TypeError, ValueError):
+            pass  # HTTP-date form of Retry-After: fall back to backoff
+    return min(delay, _RETRY_MAX_DELAY)
+
+
+async def _post_with_retry(url: str, headers: dict, payload: dict) -> httpx.Response:
+    """POST to the AI endpoint, retrying transient failures.
+
+    Retries connection errors and timeouts, and HTTP 429/502/503/504, up to
+    ``_MAX_RETRIES`` times. Other HTTP errors (400/401/403/500...) fail at once.
+    """
+    for attempt in range(_MAX_RETRIES + 1):
+        response = None
+        try:
+            response = await _get_client().post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            return response
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            error = AIEndpointError(f"AI endpoint returned HTTP {status}", status_code=status)
+            retryable = status in _RETRYABLE_STATUS
+            cause, response = exc, exc.response
+        except httpx.TransportError as exc:
+            error = AIEndpointError(str(exc))
+            retryable = True
+            cause, response = exc, None
+        except httpx.HTTPError as exc:
+            raise AIEndpointError(str(exc)) from exc
+
+        if not retryable or attempt >= _MAX_RETRIES:
+            raise error from cause
+        delay = _retry_delay(attempt, response)
+        log.warning(
+            "AI endpoint call failed (%s); retry %d/%d in %.1fs",
+            error, attempt + 1, _MAX_RETRIES, delay,
+        )
+        await asyncio.sleep(delay)
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 def html_to_markdown(html: str) -> str:
