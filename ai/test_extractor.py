@@ -6,7 +6,7 @@ import httpx
 import pytest
 from extractor import (
     extract_json, html_to_markdown, auto_chunk,
-    ExtractionError, AIEndpointError, MalformedResponseError,
+    ExtractionError, AIEndpointError, MalformedResponseError, SchemaValidationError,
 )
 
 
@@ -260,3 +260,86 @@ def test_extract_json_allows_localhost_http(mock_completion, mock_client):
         result = asyncio.run(extract_json("<p>Acme Corp founded 2020</p>", {}))
 
     assert result == expected
+
+
+# --- schema validation ---
+
+_PERSON_SCHEMA = {
+    "type": "object",
+    "properties": {"name": {"type": "string"}, "age": {"type": "integer"}},
+    "required": ["name"],
+}
+
+
+def _client_returning(content):
+    resp = MagicMock()
+    resp.json.return_value = {"choices": [{"message": {"content": json.dumps(content)}}]}
+    resp.raise_for_status = MagicMock()
+    client = AsyncMock()
+    client.post.return_value = resp
+    return client
+
+
+def _extract(client, schema, html="<p>x</p>"):
+    with patch("extractor._get_client", return_value=client), \
+         patch("extractor._API_BASE", "https://api.example.com/v1"):
+        return asyncio.run(extract_json(html, schema))
+
+
+def test_extract_json_accepts_conforming_response():
+    client = _client_returning({"name": "Ada", "age": 36})
+    assert _extract(client, _PERSON_SCHEMA) == {"name": "Ada", "age": 36}
+
+
+def test_extract_json_rejects_wrong_type():
+    client = _client_returning({"name": "Ada", "age": "thirty-six"})
+    with pytest.raises(SchemaValidationError, match=r"\$\['age'\]") as exc_info:
+        _extract(client, _PERSON_SCHEMA)
+    assert isinstance(exc_info.value, ExtractionError)
+    assert exc_info.value.errors[0][0] == "$['age']"
+    assert "thirty-six" in exc_info.value.raw_output
+
+
+def test_extract_json_rejects_missing_required_field():
+    client = _client_returning({"age": 36})
+    with pytest.raises(SchemaValidationError, match="'name' is a required property"):
+        _extract(client, _PERSON_SCHEMA)
+
+
+def test_extract_json_reports_all_violations():
+    client = _client_returning({"age": "x"})
+    with pytest.raises(SchemaValidationError, match=r"\(\+1 more\)") as exc_info:
+        _extract(client, _PERSON_SCHEMA)
+    assert len(exc_info.value.errors) == 2
+
+
+def test_extract_json_validates_nested_paths():
+    schema = {
+        "type": "object",
+        "properties": {"items": {"type": "array", "items": {"type": "object",
+                       "properties": {"price": {"type": "number"}}}}},
+    }
+    client = _client_returning({"items": [{"price": 1}, {"price": "free"}]})
+    with pytest.raises(SchemaValidationError) as exc_info:
+        _extract(client, schema)
+    assert exc_info.value.errors[0][0] == "$['items'][1]['price']"
+
+
+def test_extract_json_rejects_non_object_when_schema_requires_object():
+    client = _client_returning(["not", "an", "object"])
+    with pytest.raises(SchemaValidationError):
+        _extract(client, _PERSON_SCHEMA)
+
+
+def test_extract_json_truncates_raw_output_on_validation_error():
+    client = _client_returning({"name": "x" * 1000, "age": "bad"})
+    with pytest.raises(SchemaValidationError) as exc_info:
+        _extract(client, _PERSON_SCHEMA)
+    assert len(exc_info.value.raw_output) <= 200
+
+
+def test_extract_json_rejects_invalid_schema_before_calling_api():
+    client = _client_returning({})
+    with pytest.raises(ValueError, match="invalid extraction schema"):
+        _extract(client, {"type": "not-a-type"})
+    client.post.assert_not_called()
