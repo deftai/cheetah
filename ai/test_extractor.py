@@ -431,10 +431,11 @@ def test_backoff_is_exponential_and_capped():
     client = AsyncMock()
     client.post.return_value = _http_error_response(503)
     sleep = AsyncMock()
-    with patch("extractor.asyncio.sleep", new=sleep), patch("extractor._MAX_RETRIES", 5):
+    with patch("extractor.asyncio.sleep", new=sleep), patch("extractor._MAX_RETRIES", 6):
         with pytest.raises(AIEndpointError):
             _run(client)
-    assert [c.args[0] for c in sleep.call_args_list] == [0.5, 1.0, 2.0, 4.0, 8.0]
+    # 0.5 doubling reaches the 8s cap on the 5th retry; the 6th must not grow to 16s.
+    assert [c.args[0] for c in sleep.call_args_list] == [0.5, 1.0, 2.0, 4.0, 8.0, 8.0]
 
 
 def test_retry_after_header_is_honored_but_capped():
