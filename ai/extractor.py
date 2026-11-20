@@ -56,12 +56,20 @@ log = logging.getLogger(__name__)
 _API_BASE = os.environ.get("AI_ENDPOINT_URL", "")
 _API_KEY = os.environ.get("AI_API_KEY", "")
 _MODEL = os.environ.get("AI_MODEL", "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo")
-# Comma-separated models tried in order after _MODEL fails (see extract_json).
+_MAX_FALLBACK_MODELS = 3
+
+
 def _parse_model_list(raw: str) -> list[str]:
+    """Split a comma-separated model list, dropping blanks."""
     return [m.strip() for m in raw.split(",") if m.strip()]
 
 
-_FALLBACK_MODELS = _parse_model_list(os.environ.get("AI_FALLBACK_MODELS", ""))
+def _load_fallback_models(raw: str) -> list[str]:
+    """Models tried in order after _MODEL fails (see extract_json), capped to bound latency."""
+    return _parse_model_list(raw)[:_MAX_FALLBACK_MODELS]
+
+
+_FALLBACK_MODELS = _load_fallback_models(os.environ.get("AI_FALLBACK_MODELS", ""))
 try:
     _TIMEOUT = int(os.environ.get("AI_TIMEOUT", "30"))
 except (ValueError, TypeError):
@@ -145,15 +153,26 @@ async def extract_json(html: str, schema: dict) -> dict:
     models = list(dict.fromkeys([_MODEL, *_FALLBACK_MODELS]))
     log.info("extraction request: url=%s content_length=%d", parsed.hostname, len(markdown))
     for index, model in enumerate(models):
+        # Only the primary gets the full retry budget; fallbacks get one attempt each so the
+        # worst case is (retries + 1) + len(fallbacks) calls, not models x (retries + 1).
+        max_retries = _MAX_RETRIES if index == 0 else 0
         try:
-            return await _extract_with_model(model, url, headers, messages, schema, validator_cls)
+            result = await _extract_with_model(
+                model, url, headers, messages, schema, validator_cls, max_retries,
+            )
         except ExtractionError as exc:
             if index == len(models) - 1 or not _should_try_next_model(exc):
                 raise
+            # Log only non-content fields: exception text can hold extracted page data (PII).
             log.warning(
-                "model %s failed (%s: %s); falling back to %s",
-                model, type(exc).__name__, exc, models[index + 1],
+                "model %s failed (%s, status=%s); falling back to %s",
+                model, type(exc).__name__, getattr(exc, "status_code", None), models[index + 1],
             )
+        else:
+            if index > 0:
+                log.info("extraction served by fallback model %s (%d of %d)",
+                         model, index + 1, len(models))
+            return result
     raise AssertionError("unreachable")  # pragma: no cover
 
 
@@ -163,7 +182,13 @@ def _should_try_next_model(exc: ExtractionError) -> bool:
 
 
 async def _extract_with_model(
-    model: str, url: str, headers: dict, messages: list, schema: dict, validator_cls,
+    model: str,
+    url: str,
+    headers: dict[str, str],
+    messages: list[dict[str, str]],
+    schema: dict,
+    validator_cls: type,
+    max_retries: int,
 ) -> dict:
     """One model's attempt: call (with retries), parse, and validate the reply."""
     payload = {
@@ -172,7 +197,7 @@ async def _extract_with_model(
         "temperature": 0,
         "response_format": {"type": "json_object"},
     }
-    resp = await _post_with_retry(url, headers, payload)
+    resp = await _post_with_retry(url, headers, payload, max_retries)
 
     try:
         body = resp.json()
@@ -224,10 +249,13 @@ def _validate_against_schema(result, schema: dict, validator_cls) -> None:
          e.message[:200])
         for e in violations
     ]
-    first_path, first_msg = errors[0]
+    # The message names only the path and the failed keyword (type, required, ...): jsonschema's
+    # own text quotes the offending value, which is extracted page data and must not reach logs.
+    # Full detail stays on ``errors`` / ``raw_output`` for callers that need it.
+    first_path = errors[0][0]
     extra = f" (+{len(errors) - 1} more)" if len(errors) > 1 else ""
     raise SchemaValidationError(
-        f"AI response does not match schema at {first_path}: {first_msg}{extra}",
+        f"AI response does not match schema at {first_path}: failed '{violations[0].validator}'{extra}",
         errors=errors,
         raw_output=json.dumps(result)[:200],
     )
@@ -244,13 +272,15 @@ def _retry_delay(attempt: int, response: httpx.Response | None) -> float:
     return min(delay, _RETRY_MAX_DELAY)
 
 
-async def _post_with_retry(url: str, headers: dict, payload: dict) -> httpx.Response:
+async def _post_with_retry(
+    url: str, headers: dict, payload: dict, max_retries: int,
+) -> httpx.Response:
     """POST to the AI endpoint, retrying transient failures.
 
     Retries connection errors and timeouts, and HTTP 429/502/503/504, up to
-    ``_MAX_RETRIES`` times. Other HTTP errors (400/401/403/500...) fail at once.
+    ``max_retries`` times. Other HTTP errors (400/401/403/500...) fail at once.
     """
-    for attempt in range(_MAX_RETRIES + 1):
+    for attempt in range(max_retries + 1):
         response = None
         try:
             response = await _get_client().post(url, headers=headers, json=payload)
@@ -268,12 +298,12 @@ async def _post_with_retry(url: str, headers: dict, payload: dict) -> httpx.Resp
         except httpx.HTTPError as exc:
             raise AIEndpointError(str(exc)) from exc
 
-        if not retryable or attempt >= _MAX_RETRIES:
+        if not retryable or attempt >= max_retries:
             raise error from cause
         delay = _retry_delay(attempt, response)
         log.warning(
             "AI endpoint call failed (%s); retry %d/%d in %.1fs",
-            error, attempt + 1, _MAX_RETRIES, delay,
+            error, attempt + 1, max_retries, delay,
         )
         await asyncio.sleep(delay)
     raise AssertionError("unreachable")  # pragma: no cover
