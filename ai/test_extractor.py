@@ -343,3 +343,130 @@ def test_extract_json_rejects_invalid_schema_before_calling_api():
     with pytest.raises(ValueError, match="invalid extraction schema"):
         _extract(client, {"type": "not-a-type"})
     client.post.assert_not_called()
+
+
+# --- retry ---
+
+@pytest.fixture(autouse=True)
+def _no_backoff_sleep():
+    """Keep retry tests instant; individual tests inspect sleeps via their own patch."""
+    with patch("extractor.asyncio.sleep", new=AsyncMock()):
+        yield
+
+
+def _http_error_response(status, headers=None):
+    resp = MagicMock()
+    resp.status_code = status
+    resp.headers = headers or {}
+    resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+        f"HTTP {status}", request=MagicMock(), response=resp,
+    )
+    return resp
+
+
+def _ok_response(content=None):
+    resp = MagicMock()
+    resp.json.return_value = {
+        "choices": [{"message": {"content": json.dumps(content or {"ok": True})}}]
+    }
+    resp.raise_for_status = MagicMock()
+    return resp
+
+
+def _run(client):
+    with patch("extractor._get_client", return_value=client), \
+         patch("extractor._API_BASE", "https://api.example.com/v1"):
+        return asyncio.run(extract_json("<p>x</p>", {}))
+
+
+@pytest.mark.parametrize("status", [429, 502, 503, 504])
+def test_retries_transient_status_then_succeeds(status):
+    client = AsyncMock()
+    client.post.side_effect = [_http_error_response(status), _ok_response({"a": 1})]
+    assert _run(client) == {"a": 1}
+    assert client.post.call_count == 2
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 500])
+def test_does_not_retry_non_transient_status(status):
+    client = AsyncMock()
+    client.post.return_value = _http_error_response(status)
+    with pytest.raises(AIEndpointError) as exc_info:
+        _run(client)
+    assert exc_info.value.status_code == status
+    assert client.post.call_count == 1
+
+
+@pytest.mark.parametrize("exc", [
+    httpx.ConnectError("refused"), httpx.ReadTimeout("slow"), httpx.ConnectTimeout("slow"),
+])
+def test_retries_connection_errors_and_timeouts(exc):
+    client = AsyncMock()
+    client.post.side_effect = [exc, _ok_response()]
+    assert _run(client) == {"ok": True}
+    assert client.post.call_count == 2
+
+
+def test_gives_up_after_max_retries_and_raises_last_error():
+    client = AsyncMock()
+    client.post.return_value = _http_error_response(503)
+    with patch("extractor._MAX_RETRIES", 2):
+        with pytest.raises(AIEndpointError, match="HTTP 503") as exc_info:
+            _run(client)
+    assert client.post.call_count == 3
+    assert exc_info.value.status_code == 503
+    assert isinstance(exc_info.value.__cause__, httpx.HTTPStatusError)
+
+
+def test_max_retries_zero_disables_retry():
+    client = AsyncMock()
+    client.post.return_value = _http_error_response(503)
+    with patch("extractor._MAX_RETRIES", 0):
+        with pytest.raises(AIEndpointError):
+            _run(client)
+    assert client.post.call_count == 1
+
+
+def test_backoff_is_exponential_and_capped():
+    client = AsyncMock()
+    client.post.return_value = _http_error_response(503)
+    sleep = AsyncMock()
+    with patch("extractor.asyncio.sleep", new=sleep), patch("extractor._MAX_RETRIES", 5):
+        with pytest.raises(AIEndpointError):
+            _run(client)
+    assert [c.args[0] for c in sleep.call_args_list] == [0.5, 1.0, 2.0, 4.0, 8.0]
+
+
+def test_retry_after_header_is_honored_but_capped():
+    client = AsyncMock()
+    client.post.side_effect = [
+        _http_error_response(429, {"Retry-After": "3"}),
+        _http_error_response(429, {"Retry-After": "600"}),
+        _ok_response(),
+    ]
+    sleep = AsyncMock()
+    with patch("extractor.asyncio.sleep", new=sleep):
+        _run(client)
+    assert [c.args[0] for c in sleep.call_args_list] == [3.0, 8.0]
+
+
+def test_http_date_retry_after_falls_back_to_backoff():
+    client = AsyncMock()
+    client.post.side_effect = [
+        _http_error_response(429, {"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}),
+        _ok_response(),
+    ]
+    sleep = AsyncMock()
+    with patch("extractor.asyncio.sleep", new=sleep):
+        _run(client)
+    assert [c.args[0] for c in sleep.call_args_list] == [0.5]
+
+
+def test_malformed_response_is_not_retried():
+    client = AsyncMock()
+    resp = _ok_response()
+    resp.json.return_value = {"choices": []}
+    client.post.return_value = resp
+    with pytest.raises(MalformedResponseError):
+        _run(client)
+    assert client.post.call_count == 1
