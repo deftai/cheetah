@@ -7,7 +7,7 @@ import pytest
 from extractor import (
     extract_json, html_to_markdown, auto_chunk,
     ExtractionError, AIEndpointError, MalformedResponseError, SchemaValidationError,
-    _parse_model_list, _load_fallback_models,
+    _load_fallback_models,
 )
 
 
@@ -579,11 +579,6 @@ def test_invalid_schema_does_not_try_any_model():
     client.post.assert_not_called()
 
 
-def test_parse_model_list_trims_and_drops_empty_entries():
-    assert _parse_model_list(" a/b , ,c ,") == ["a/b", "c"]
-    assert _parse_model_list("") == []
-
-
 def test_fallback_models_get_one_attempt_each_not_a_full_retry_budget():
     client = AsyncMock()
     client.post.return_value = _http_error_response(503)
@@ -593,9 +588,40 @@ def test_fallback_models_get_one_attempt_each_not_a_full_retry_budget():
     assert _models_called(client) == ["primary"] * 3 + ["b1", "b2"]
 
 
-def test_fallback_list_is_capped_to_three():
+def test_fallback_list_trims_blanks_and_is_capped_to_three():
     assert _load_fallback_models(" a, b ,c,d,e") == ["a", "b", "c"]
+    assert _load_fallback_models(" a/b , ,c ,") == ["a/b", "c"]
     assert _load_fallback_models("") == []
+
+
+def test_fallback_list_drops_primary_and_duplicates_before_capping():
+    assert _load_fallback_models("primary,a,a,b,c", "primary") == ["a", "b", "c"]
+
+
+def test_401_on_a_fallback_model_stops_the_chain():
+    client = AsyncMock()
+    client.post.side_effect = [_http_error_response(503), _http_error_response(401)]
+    with pytest.raises(AIEndpointError) as exc_info:
+        _run_with_models(client, "primary", ["b1", "b2"])
+    assert exc_info.value.status_code == 401
+    assert _models_called(client) == ["primary", "b1"]
+
+
+def test_schema_error_path_redacts_model_chosen_keys():
+    schema = {"type": "object", "additionalProperties": {"type": "integer"}}
+    client = _client_returning({"jane.doe@example.com": "not-an-int"})
+    with pytest.raises(SchemaValidationError) as exc_info:
+        _extract(client, schema)
+    assert "jane.doe@example.com" not in str(exc_info.value)
+    assert "$[*]" in str(exc_info.value)
+    # callers still get the real path
+    assert exc_info.value.errors[0][0] == "$['jane.doe@example.com']"
+
+
+def test_schema_error_path_keeps_schema_declared_keys():
+    client = _client_returning({"name": "Ada", "age": "x"})
+    with pytest.raises(SchemaValidationError, match=r"\$\['age'\]"):
+        _extract(client, _PERSON_SCHEMA)
 
 
 def test_fallback_warning_logs_no_extracted_data(caplog):

@@ -59,17 +59,18 @@ _MODEL = os.environ.get("AI_MODEL", "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo
 _MAX_FALLBACK_MODELS = 3
 
 
-def _parse_model_list(raw: str) -> list[str]:
-    """Split a comma-separated model list, dropping blanks."""
-    return [m.strip() for m in raw.split(",") if m.strip()]
+def _load_fallback_models(raw: str, primary: str = "") -> list[str]:
+    """Parse a comma-separated model list into the fallbacks tried after ``primary`` fails.
+
+    Blanks, duplicates and the primary itself are dropped *before* the cap, so the cap
+    (which bounds worst-case latency) counts only models that will actually be tried.
+    """
+    names = (m.strip() for m in raw.split(","))
+    unique = dict.fromkeys(m for m in names if m and m != primary)
+    return list(unique)[:_MAX_FALLBACK_MODELS]
 
 
-def _load_fallback_models(raw: str) -> list[str]:
-    """Models tried in order after _MODEL fails (see extract_json), capped to bound latency."""
-    return _parse_model_list(raw)[:_MAX_FALLBACK_MODELS]
-
-
-_FALLBACK_MODELS = _load_fallback_models(os.environ.get("AI_FALLBACK_MODELS", ""))
+_FALLBACK_MODELS = _load_fallback_models(os.environ.get("AI_FALLBACK_MODELS", ""), _MODEL)
 try:
     _TIMEOUT = int(os.environ.get("AI_TIMEOUT", "30"))
 except (ValueError, TypeError):
@@ -244,20 +245,40 @@ def _validate_against_schema(result, schema: dict, validator_cls) -> None:
     )
     if not violations:
         return
-    errors = [
-        ("$" + "".join(f"[{p!r}]" if isinstance(p, str) else f"[{p}]" for p in e.absolute_path),
-         e.message[:200])
-        for e in violations
-    ]
+    errors = [(_format_path(e.absolute_path), e.message[:200]) for e in violations]
     # The message names only the path and the failed keyword (type, required, ...): jsonschema's
     # own text quotes the offending value, which is extracted page data and must not reach logs.
     # Full detail stays on ``errors`` / ``raw_output`` for callers that need it.
-    first_path = errors[0][0]
+    first = violations[0]
+    first_path = _format_path(first.absolute_path, redact_keys=_has_open_keys(first))
     extra = f" (+{len(errors) - 1} more)" if len(errors) > 1 else ""
+    failed = first.validator
     raise SchemaValidationError(
-        f"AI response does not match schema at {first_path}: failed '{violations[0].validator}'{extra}",
+        f"AI response does not match schema at {first_path}: failed '{failed}'{extra}",
         errors=errors,
         raw_output=json.dumps(result)[:200],
+    )
+
+
+# Schema keywords under which object keys come from the model's output, not from the schema.
+_OPEN_KEY_KEYWORDS = frozenset(
+    {"additionalProperties", "patternProperties", "unevaluatedProperties", "propertyNames"}
+)
+
+
+def _has_open_keys(error: jsonschema.ValidationError) -> bool:
+    return not _OPEN_KEY_KEYWORDS.isdisjoint(error.absolute_schema_path)
+
+
+def _format_path(parts, redact_keys: bool = False) -> str:
+    """Render a JSON path like ``$['items'][1]['price']``.
+
+    With ``redact_keys``, object keys are shown as ``[*]``: they came from the model's output
+    (e.g. an email used as a key under ``additionalProperties``) and may be personal data.
+    """
+    return "$" + "".join(
+        ("[*]" if redact_keys else f"[{p!r}]") if isinstance(p, str) else f"[{p}]"
+        for p in parts
     )
 
 
