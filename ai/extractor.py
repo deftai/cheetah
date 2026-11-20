@@ -266,8 +266,22 @@ _OPEN_KEY_KEYWORDS = frozenset(
 )
 
 
+# Keywords whose *next* schema-path segment is a user-chosen name (a declared field, a regex,
+# a definition), not a keyword. Those names must not be mistaken for keywords.
+_NAME_MAP_KEYWORDS = frozenset(
+    {"properties", "dependentSchemas", "dependentRequired", "dependencies", "$defs", "definitions"}
+)
+
+
 def _has_open_keys(error: jsonschema.ValidationError) -> bool:
-    return not _OPEN_KEY_KEYWORDS.isdisjoint(error.absolute_schema_path)
+    """True if the error sits under a keyword whose object keys come from the model's output."""
+    path = iter(error.absolute_schema_path)
+    for part in path:
+        if part in _OPEN_KEY_KEYWORDS:
+            return True
+        if part in _NAME_MAP_KEYWORDS:
+            next(path, None)  # skip the declared name, e.g. a field literally called "propertyNames"
+    return False
 
 
 def _format_path(parts, redact_keys: bool = False) -> str:

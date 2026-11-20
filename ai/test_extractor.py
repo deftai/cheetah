@@ -646,3 +646,29 @@ def test_schema_validation_error_message_omits_the_offending_value():
     assert "failed 'type'" in str(exc_info.value)
     # detail is still available to callers that want it
     assert "jane.doe@example.com" in exc_info.value.errors[0][1]
+
+
+@pytest.mark.parametrize("schema, key_in_path", [
+    ({"type": "object", "additionalProperties": {"type": "integer"}}, True),
+    ({"type": "object", "patternProperties": {"^.+@": {"type": "integer"}}}, True),
+    # jsonschema reports an unevaluatedProperties error on the parent object, so no key appears.
+    ({"type": "object", "properties": {"x": {}}, "unevaluatedProperties": False}, False),
+])
+def test_schema_error_never_shows_model_chosen_keys(schema, key_in_path):
+    client = _client_returning({"jane.doe@example.com": "not-an-int"})
+    with pytest.raises(SchemaValidationError) as exc_info:
+        _extract(client, schema)
+    assert "jane.doe@example.com" not in str(exc_info.value)
+    assert ("$[*]" in str(exc_info.value)) is key_in_path
+
+
+@pytest.mark.parametrize("field", [
+    "propertyNames", "additionalProperties", "patternProperties", "unevaluatedProperties",
+])
+def test_declared_field_named_like_a_keyword_is_not_redacted(field):
+    schema = {"type": "object", "properties": {field: {"type": "integer"}}}
+    client = _client_returning({field: "bad"})
+    with pytest.raises(SchemaValidationError) as exc_info:
+        _extract(client, schema)
+    assert f"$['{field}']" in str(exc_info.value)
+    assert "[*]" not in str(exc_info.value)
