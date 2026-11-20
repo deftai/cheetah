@@ -7,6 +7,7 @@ import pytest
 from extractor import (
     extract_json, html_to_markdown, auto_chunk,
     ExtractionError, AIEndpointError, MalformedResponseError, SchemaValidationError,
+    _parse_model_list, _load_fallback_models,
 )
 
 
@@ -302,8 +303,9 @@ def test_extract_json_rejects_wrong_type():
 
 def test_extract_json_rejects_missing_required_field():
     client = _client_returning({"age": 36})
-    with pytest.raises(SchemaValidationError, match="'name' is a required property"):
+    with pytest.raises(SchemaValidationError, match="failed 'required'") as exc_info:
         _extract(client, _PERSON_SCHEMA)
+    assert "'name' is a required property" in exc_info.value.errors[0][1]
 
 
 def test_extract_json_reports_all_violations():
@@ -471,3 +473,150 @@ def test_malformed_response_is_not_retried():
     with pytest.raises(MalformedResponseError):
         _run(client)
     assert client.post.call_count == 1
+
+
+# --- fallback models ---
+
+def _models_called(client):
+    return [c.kwargs["json"]["model"] for c in client.post.call_args_list]
+
+
+def _run_with_models(client, primary, fallbacks, schema=None, max_retries=0):
+    with patch("extractor._get_client", return_value=client), \
+         patch("extractor._API_BASE", "https://api.example.com/v1"), \
+         patch("extractor._MODEL", primary), \
+         patch("extractor._FALLBACK_MODELS", fallbacks), \
+         patch("extractor._MAX_RETRIES", max_retries):
+        return asyncio.run(extract_json("<p>x</p>", schema or {}))
+
+
+def test_no_fallback_models_uses_only_primary():
+    client = AsyncMock()
+    client.post.return_value = _http_error_response(503)
+    with pytest.raises(AIEndpointError):
+        _run_with_models(client, "primary", [])
+    assert _models_called(client) == ["primary"]
+
+
+def test_primary_success_never_calls_fallback():
+    client = AsyncMock()
+    client.post.return_value = _ok_response({"a": 1})
+    assert _run_with_models(client, "primary", ["backup"]) == {"a": 1}
+    assert _models_called(client) == ["primary"]
+
+
+def test_falls_back_when_primary_endpoint_fails():
+    client = AsyncMock()
+    client.post.side_effect = [_http_error_response(503), _ok_response({"a": 1})]
+    assert _run_with_models(client, "primary", ["backup"]) == {"a": 1}
+    assert _models_called(client) == ["primary", "backup"]
+
+
+def test_falls_back_on_model_specific_http_error():
+    client = AsyncMock()
+    client.post.side_effect = [_http_error_response(404), _ok_response({"a": 1})]
+    assert _run_with_models(client, "primary", ["backup"]) == {"a": 1}
+    assert _models_called(client) == ["primary", "backup"]
+
+
+def test_falls_back_on_malformed_response():
+    bad = _ok_response()
+    bad.json.return_value = {"choices": [{"message": {"content": "not json"}}]}
+    client = AsyncMock()
+    client.post.side_effect = [bad, _ok_response({"a": 1})]
+    assert _run_with_models(client, "primary", ["backup"]) == {"a": 1}
+    assert _models_called(client) == ["primary", "backup"]
+
+
+def test_falls_back_on_schema_mismatch():
+    client = AsyncMock()
+    client.post.side_effect = [_ok_response({"age": "x"}), _ok_response({"name": "Ada"})]
+    assert _run_with_models(client, "primary", ["backup"], _PERSON_SCHEMA) == {"name": "Ada"}
+    assert _models_called(client) == ["primary", "backup"]
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_does_not_fall_back_on_auth_errors(status):
+    client = AsyncMock()
+    client.post.return_value = _http_error_response(status)
+    with pytest.raises(AIEndpointError) as exc_info:
+        _run_with_models(client, "primary", ["backup"])
+    assert exc_info.value.status_code == status
+    assert _models_called(client) == ["primary"]
+
+
+def test_tries_fallbacks_in_order_and_raises_last_error():
+    client = AsyncMock()
+    client.post.side_effect = [
+        _http_error_response(503), _http_error_response(502), _http_error_response(504),
+    ]
+    with pytest.raises(AIEndpointError, match="HTTP 504"):
+        _run_with_models(client, "primary", ["b1", "b2"])
+    assert _models_called(client) == ["primary", "b1", "b2"]
+
+
+def test_duplicate_models_are_only_tried_once():
+    client = AsyncMock()
+    client.post.return_value = _http_error_response(503)
+    with pytest.raises(AIEndpointError):
+        _run_with_models(client, "primary", ["primary", "backup", "backup"])
+    assert _models_called(client) == ["primary", "backup"]
+
+
+def test_retries_run_per_model_before_falling_back():
+    client = AsyncMock()
+    client.post.side_effect = [
+        _http_error_response(503), _http_error_response(503), _ok_response({"a": 1}),
+    ]
+    assert _run_with_models(client, "primary", ["backup"], max_retries=1) == {"a": 1}
+    assert _models_called(client) == ["primary", "primary", "backup"]
+
+
+def test_invalid_schema_does_not_try_any_model():
+    client = AsyncMock()
+    with pytest.raises(ValueError, match="invalid extraction schema"):
+        _run_with_models(client, "primary", ["backup"], {"type": "nope"})
+    client.post.assert_not_called()
+
+
+def test_parse_model_list_trims_and_drops_empty_entries():
+    assert _parse_model_list(" a/b , ,c ,") == ["a/b", "c"]
+    assert _parse_model_list("") == []
+
+
+def test_fallback_models_get_one_attempt_each_not_a_full_retry_budget():
+    client = AsyncMock()
+    client.post.return_value = _http_error_response(503)
+    with pytest.raises(AIEndpointError):
+        _run_with_models(client, "primary", ["b1", "b2"], max_retries=2)
+    # primary: 1 + 2 retries; each fallback: a single attempt
+    assert _models_called(client) == ["primary"] * 3 + ["b1", "b2"]
+
+
+def test_fallback_list_is_capped_to_three():
+    assert _load_fallback_models(" a, b ,c,d,e") == ["a", "b", "c"]
+    assert _load_fallback_models("") == []
+
+
+def test_fallback_warning_logs_no_extracted_data(caplog):
+    secret = "jane.doe@example.com"
+    client = AsyncMock()
+    client.post.side_effect = [
+        _ok_response({"name": "Ada", "age": secret}), _ok_response({"name": "Ada"}),
+    ]
+    with caplog.at_level("INFO", logger="extractor"):
+        _run_with_models(client, "primary", ["backup"], _PERSON_SCHEMA)
+    text = caplog.text
+    assert "falling back to backup" in text and "SchemaValidationError" in text
+    assert secret not in text
+    assert "served by fallback model backup" in text
+
+
+def test_schema_validation_error_message_omits_the_offending_value():
+    client = _client_returning({"name": "Ada", "age": "jane.doe@example.com"})
+    with pytest.raises(SchemaValidationError) as exc_info:
+        _extract(client, _PERSON_SCHEMA)
+    assert "jane.doe@example.com" not in str(exc_info.value)
+    assert "failed 'type'" in str(exc_info.value)
+    # detail is still available to callers that want it
+    assert "jane.doe@example.com" in exc_info.value.errors[0][1]
