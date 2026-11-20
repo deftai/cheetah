@@ -7,6 +7,7 @@ import re
 import urllib.parse
 
 import httpx
+import jsonschema
 from markdownify import markdownify
 
 
@@ -28,6 +29,25 @@ class MalformedResponseError(ExtractionError):
     def __init__(self, message: str, raw_output: str | None = None):
         super().__init__(message)
         self.raw_output = raw_output
+
+
+class SchemaValidationError(ExtractionError):
+    """AI response is valid JSON but does not match the caller's schema.
+
+    ``errors`` lists each violation as ``(json_path, message)``; ``raw_output``
+    is a truncated copy of the received JSON.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        errors: list[tuple[str, str]] | None = None,
+        raw_output: str | None = None,
+    ):
+        super().__init__(message)
+        self.errors = errors or []
+        self.raw_output = raw_output
+
 
 log = logging.getLogger(__name__)
 
@@ -71,6 +91,13 @@ async def extract_json(html: str, schema: dict) -> dict:
     """
     if not _API_BASE:
         raise RuntimeError("AI_ENDPOINT_URL not configured")
+
+    # Fail before spending a model call if the caller's schema is itself invalid.
+    validator_cls = jsonschema.validators.validator_for(schema)
+    try:
+        validator_cls.check_schema(schema)
+    except jsonschema.SchemaError as exc:
+        raise ValueError(f"invalid extraction schema: {exc.message}") from exc
 
     parsed = urllib.parse.urlparse(_API_BASE)
     if parsed.scheme != "https" and parsed.hostname not in _LOCAL_HOSTS:
@@ -144,12 +171,37 @@ async def extract_json(html: str, schema: dict) -> dict:
         ) from exc
 
     try:
-        return json.loads(content)
+        result = json.loads(content)
     except (json.JSONDecodeError, TypeError) as exc:
         raise MalformedResponseError(
             f"AI response is not valid JSON: {exc}",
             raw_output=str(content)[:200] if content is not None else None,
         ) from exc
+
+    _validate_against_schema(result, schema, validator_cls)
+    return result
+
+
+def _validate_against_schema(result, schema: dict, validator_cls) -> None:
+    """Raise SchemaValidationError if ``result`` does not conform to ``schema``."""
+    violations = sorted(
+        validator_cls(schema).iter_errors(result),
+        key=lambda e: [str(p) for p in e.absolute_path],
+    )
+    if not violations:
+        return
+    errors = [
+        ("$" + "".join(f"[{p!r}]" if isinstance(p, str) else f"[{p}]" for p in e.absolute_path),
+         e.message[:200])
+        for e in violations
+    ]
+    first_path, first_msg = errors[0]
+    extra = f" (+{len(errors) - 1} more)" if len(errors) > 1 else ""
+    raise SchemaValidationError(
+        f"AI response does not match schema at {first_path}: {first_msg}{extra}",
+        errors=errors,
+        raw_output=json.dumps(result)[:200],
+    )
 
 
 def html_to_markdown(html: str) -> str:
