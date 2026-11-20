@@ -56,6 +56,12 @@ log = logging.getLogger(__name__)
 _API_BASE = os.environ.get("AI_ENDPOINT_URL", "")
 _API_KEY = os.environ.get("AI_API_KEY", "")
 _MODEL = os.environ.get("AI_MODEL", "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo")
+# Comma-separated models tried in order after _MODEL fails (see extract_json).
+def _parse_model_list(raw: str) -> list[str]:
+    return [m.strip() for m in raw.split(",") if m.strip()]
+
+
+_FALLBACK_MODELS = _parse_model_list(os.environ.get("AI_FALLBACK_MODELS", ""))
 try:
     _TIMEOUT = int(os.environ.get("AI_TIMEOUT", "30"))
 except (ValueError, TypeError):
@@ -127,21 +133,45 @@ async def extract_json(html: str, schema: dict) -> dict:
     if _API_KEY:
         headers["Authorization"] = f"Bearer {_API_KEY}"
 
-    payload = {
-        "model": _MODEL,
-        "messages": [
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-        "temperature": 0,
-        "response_format": {"type": "json_object"},
-    }
+    messages = [
+        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
 
     url = _API_BASE.rstrip("/")
     if not url.endswith("/chat/completions"):
         url += "/chat/completions"
 
+    models = list(dict.fromkeys([_MODEL, *_FALLBACK_MODELS]))
     log.info("extraction request: url=%s content_length=%d", parsed.hostname, len(markdown))
+    for index, model in enumerate(models):
+        try:
+            return await _extract_with_model(model, url, headers, messages, schema, validator_cls)
+        except ExtractionError as exc:
+            if index == len(models) - 1 or not _should_try_next_model(exc):
+                raise
+            log.warning(
+                "model %s failed (%s: %s); falling back to %s",
+                model, type(exc).__name__, exc, models[index + 1],
+            )
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+def _should_try_next_model(exc: ExtractionError) -> bool:
+    """Another model can help with a bad model, reply or outage, but not with bad credentials."""
+    return not (isinstance(exc, AIEndpointError) and exc.status_code in (401, 403))
+
+
+async def _extract_with_model(
+    model: str, url: str, headers: dict, messages: list, schema: dict, validator_cls,
+) -> dict:
+    """One model's attempt: call (with retries), parse, and validate the reply."""
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0,
+        "response_format": {"type": "json_object"},
+    }
     resp = await _post_with_retry(url, headers, payload)
 
     try:
