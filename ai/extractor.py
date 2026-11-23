@@ -37,6 +37,11 @@ class SchemaValidationError(ExtractionError):
 
     ``errors`` lists each violation as ``(json_path, message)``; ``raw_output``
     is a truncated copy of the received JSON.
+
+    Privacy: ``errors`` and ``raw_output`` can contain data extracted from the page
+    (possibly PII), including model-chosen object keys in the paths. Do not log them or
+    put them in user-facing messages. ``str(exc)`` is safe: it names only the failed
+    keyword and a path whose model-chosen keys are shown as ``[*]``.
     """
 
     def __init__(
@@ -59,7 +64,7 @@ _MODEL = os.environ.get("AI_MODEL", "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo
 _MAX_FALLBACK_MODELS = 3
 
 
-def _load_fallback_models(raw: str, primary: str = "") -> list[str]:
+def _load_fallback_models(raw: str, primary: str) -> list[str]:
     """Parse a comma-separated model list into the fallbacks tried after ``primary`` fails.
 
     Blanks, duplicates and the primary itself are dropped *before* the cap, so the cap
