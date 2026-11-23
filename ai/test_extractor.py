@@ -588,10 +588,13 @@ def test_fallback_models_get_one_attempt_each_not_a_full_retry_budget():
     assert _models_called(client) == ["primary"] * 3 + ["b1", "b2"]
 
 
-def test_fallback_list_trims_blanks_and_is_capped_to_three():
-    assert _load_fallback_models(" a, b ,c,d,e") == ["a", "b", "c"]
-    assert _load_fallback_models(" a/b , ,c ,") == ["a/b", "c"]
-    assert _load_fallback_models("") == []
+def test_fallback_list_trims_whitespace_and_drops_blanks():
+    assert _load_fallback_models(" a/b , ,c ,", "primary") == ["a/b", "c"]
+    assert _load_fallback_models("", "primary") == []
+
+
+def test_fallback_list_is_capped_to_three():
+    assert _load_fallback_models("a,b,c,d,e", "primary") == ["a", "b", "c"]
 
 
 def test_fallback_list_drops_primary_and_duplicates_before_capping():
